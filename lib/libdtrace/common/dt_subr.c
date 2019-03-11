@@ -24,6 +24,9 @@
  * Copyright (c) 2012 by Delphix. All rights reserved.
  * Use is subject to license terms.
  */
+/*
+ * Portions Copyright Microsoft Corporation.
+ */
 
 #ifdef illumos
 #include <sys/sysmacros.h>
@@ -38,7 +41,7 @@
 #include <stdio.h>
 #include <errno.h>
 #include <ctype.h>
-#ifdef illumos
+#if defined(illumos) || defined(_WIN32)
 #include <alloca.h>
 #else
 #include <sys/sysctl.h>
@@ -480,7 +483,7 @@ int
 #ifdef illumos
 dt_ioctl(dtrace_hdl_t *dtp, int val, void *arg)
 #else
-dt_ioctl(dtrace_hdl_t *dtp, u_long val, void *arg)
+dt_ioctl(dtrace_hdl_t *dtp, ulong_t val, void *arg)
 #endif
 {
 	const dtrace_vector_t *v = dtp->dt_vector;
@@ -506,7 +509,7 @@ dt_status(dtrace_hdl_t *dtp, processorid_t cpu)
 	const dtrace_vector_t *v = dtp->dt_vector;
 
 	if (v == NULL) {
-#ifdef illumos
+#if defined(illumos) || defined(_WIN32)
 		return (p_online(cpu, P_STATUS));
 #else
 		int maxid = 0;
@@ -597,14 +600,14 @@ dt_printf(dtrace_hdl_t *dtp, FILE *fp, const char *format, ...)
 	va_start(ap, format);
 
 	if (dtp->dt_sprintf_buflen != 0) {
-		int len;
+		size_t len;
 		char *buf;
 
 		assert(dtp->dt_sprintf_buf != NULL);
 
 		buf = &dtp->dt_sprintf_buf[len = strlen(dtp->dt_sprintf_buf)];
 		len = dtp->dt_sprintf_buflen - len;
-		assert(len >= 0);
+		assert((int)len >= 0);
 
 		va_copy(ap2, ap);
 		if ((n = vsnprintf(buf, len, format, ap2)) < 0)
@@ -612,7 +615,7 @@ dt_printf(dtrace_hdl_t *dtp, FILE *fp, const char *format, ...)
 
 		va_end(ap2);
 		va_end(ap);
-		
+
 		return (n);
 	}
 
@@ -833,6 +836,7 @@ dt_popc(ulong_t x)
 	return (x & 0x7F);
 #else
 /* This should be a #warning but for now ignore error. Err: "need td_popc() implementation" */
+	return 0;
 #endif
 }
 
@@ -889,7 +893,7 @@ dt_mutex_held(pthread_mutex_t *lock)
 static int
 dt_string2str(char *s, char *str, int nbytes)
 {
-	int len = strlen(s);
+	int len = (int)strlen(s);
 
 	if (nbytes == 0) {
 		/*

@@ -28,10 +28,14 @@
  * Copyright (c) 2013, Joyent, Inc. All rights reserved.
  * Copyright (c) 2011, 2016 by Delphix. All rights reserved.
  */
+/*
+ * Portions Copyright Microsoft Corporation.
+ */
 
 #ifndef	_DT_IMPL_H
 #define	_DT_IMPL_H
 
+#include <unistd.h>
 #include <sys/param.h>
 #include <sys/objfs.h>
 #ifndef illumos
@@ -113,18 +117,20 @@ typedef struct dt_sym {
 	uint_t ds_next;		/* index of next element in hash chain */
 } dt_sym_t;
 
+
 typedef struct dt_module {
 	dt_list_t dm_list;	/* list forward/back pointers */
 	char dm_name[DTRACE_MODNAMELEN]; /* string name of module */
 	char dm_file[MAXPATHLEN]; /* file path of module (if any) */
 	struct dt_module *dm_next; /* pointer to next module in hash chain */
+	ctf_file_t *dm_ctfp;	/* CTF container handle */
+#ifndef _WIN32
 	const dt_modops_t *dm_ops; /* pointer to data model's ops vector */
 	Elf *dm_elf;		/* libelf handle for module object */
 	objfs_info_t dm_info;	/* object filesystem private info */
 	ctf_sect_t dm_symtab;	/* symbol table for module */
 	ctf_sect_t dm_strtab;	/* string table for module */
 	ctf_sect_t dm_ctdata;	/* CTF data for module */
-	ctf_file_t *dm_ctfp;	/* CTF container handle */
 	uint_t *dm_symbuckets;	/* symbol table hash buckets (chain indices) */
 	dt_sym_t *dm_symchains;	/* symbol table hash chains buffer */
 	void *dm_asmap;		/* symbol pointers sorted by value */
@@ -133,8 +139,17 @@ typedef struct dt_module {
 	uint_t dm_nsymelems;	/* number of elements in hash table */
 	uint_t dm_asrsv;	/* actual reserved size of dm_asmap */
 	uint_t dm_aslen;	/* number of entries in dm_asmap */
+#endif
 	uint_t dm_flags;	/* module flags (see below) */
 	int dm_modid;		/* modinfo(1M) module identifier */
+#ifdef _WIN32
+	GElf_Addr dm_image_base; /* image base address */
+	GElf_Xword dm_image_size; /* size in bytes of the mapped image */
+	dt_idhash_t *dm_extern;	/* external symbol definitions */
+	uint64_t dm_symbol_base;/* symbol image base address */
+	void *dm_strmap;	/* string data */
+	void *dm_idmap;		/* map of ctf to PDB IDs */
+#else
 	GElf_Addr dm_text_va;	/* virtual address of text section */
 	GElf_Xword dm_text_size; /* size in bytes of text section */
 	GElf_Addr dm_data_va;	/* virtual address of data section */
@@ -146,10 +161,18 @@ typedef struct dt_module {
 	caddr_t dm_reloc_offset;	/* Symbol relocation offset. */
 	uintptr_t *dm_sec_offsets;
 #endif
+#endif
 	pid_t dm_pid;		/* pid for this module */
+#ifdef _WIN32
+	struct proc_handle *dm_phdl; /* target process handle for grab */
+	HANDLE dm_prochandle;   /* target process handle for symbol lookups */
+	uint_t dm_npidmods;	/* number of process modules */
+	struct dt_module **dm_pidmods; /* process module pointers */
+#else
 	uint_t dm_nctflibs;	/* number of ctf children libraries */
 	ctf_file_t **dm_libctfp; /* process library ctf pointers */
 	char **dm_libctfn;	/* names of process ctf containers */
+#endif
 } dt_module_t;
 
 #define	DT_DM_LOADED	0x1	/* module symbol and type data is loaded */
@@ -322,6 +345,9 @@ struct dtrace_hdl {
 	int dt_errline;
 #endif
 	int dt_fd;		/* file descriptor for dtrace pseudo-device */
+#ifdef _WIN32
+	struct dt_symsvr* dt_symsvr; /* symbol server for fbt provider support */
+#endif
 	int dt_ftfd;		/* file descriptor for fasttrap pseudo-device */
 	int dt_fterr;		/* saved errno from failed open of dt_ftfd */
 	int dt_cdefs_fd;	/* file descriptor for C CTF debugging cache */
@@ -577,6 +603,12 @@ enum {
 	EDT_CANTLOAD		/* failed to load a module */
 };
 
+#ifdef _WIN32
+extern struct dt_symsvr* dt_symsvr_start(void);
+extern void dt_symsvr_stop(struct dt_symsvr*);
+extern int dt_execution_policy(FILE** fp, char** s);
+#endif
+
 /*
  * Interfaces for parsing and comparing DTrace attribute tuples, which describe
  * stability and architectural binding information.  The dtrace_attribute_t
@@ -617,6 +649,9 @@ extern int dt_version_defined(dt_version_t);
 extern char *dt_cpp_add_arg(dtrace_hdl_t *, const char *);
 extern char *dt_cpp_pop_arg(dtrace_hdl_t *);
 
+extern dtrace_prog_t *dt_program_strcompile(dtrace_hdl_t *,
+    const char *, dtrace_probespec_t, uint_t, int, char *const []);
+
 #ifdef illumos
 extern int dt_set_errno(dtrace_hdl_t *, int);
 #else
@@ -630,7 +665,7 @@ extern void dt_set_errmsg(dtrace_hdl_t *, const char *, const char *,
 #ifdef illumos
 extern int dt_ioctl(dtrace_hdl_t *, int, void *);
 #else
-extern int dt_ioctl(dtrace_hdl_t *, u_long, void *);
+extern int dt_ioctl(dtrace_hdl_t *, ulong_t, void *);
 #endif
 extern int dt_status(dtrace_hdl_t *, processorid_t);
 extern long dt_sysconf(dtrace_hdl_t *, int);
@@ -661,8 +696,8 @@ extern int dt_rw_write_held(pthread_rwlock_t *);
 extern int dt_mutex_held(pthread_mutex_t *);
 extern int dt_options_load(dtrace_hdl_t *);
 
-#define DT_RW_READ_HELD(x)	dt_rw_read_held(x)	 
-#define DT_RW_WRITE_HELD(x)	dt_rw_write_held(x)	 
+#define DT_RW_READ_HELD(x)	dt_rw_read_held(x)
+#define DT_RW_WRITE_HELD(x)	dt_rw_write_held(x)
 #define DT_RW_LOCK_HELD(x)	(DT_RW_READ_HELD(x) || DT_RW_WRITE_HELD(x))
 #define DT_MUTEX_HELD(x)	dt_mutex_held(x)
 

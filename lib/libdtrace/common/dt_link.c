@@ -26,8 +26,10 @@
 
 #pragma ident	"%Z%%M%	%I%	%E% SMI"
 
+#if !defined(_WIN32)
 #define	ELF_TARGET_ALL
 #include <elf.h>
+#endif
 
 #include <sys/types.h>
 #ifdef illumos
@@ -62,6 +64,19 @@
 #include <dt_provider.h>
 #include <dt_program.h>
 #include <dt_string.h>
+
+#if defined(_WIN32)
+
+int
+dtrace_program_link(dtrace_hdl_t *dtp, dtrace_prog_t *pgp, uint_t dflags,
+    const char *file, int objc, char *const objv[])
+{
+	/* This is not yet supported on Win32 */
+	assert(FALSE);
+	return -1;
+}
+
+#else
 
 #define	ESHDR_NULL	0
 #define	ESHDR_SHSTRTAB	1
@@ -1961,3 +1976,5 @@ done:
 #endif
 	return (ret);
 }
+
+#endif

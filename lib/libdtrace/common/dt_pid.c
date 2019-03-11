@@ -26,6 +26,9 @@
 /*
  * Copyright (c) 2013, Joyent, Inc.  All rights reserved.
  */
+/*
+ * Portions Copyright Microsoft Corporation.
+ */
 
 #include <assert.h>
 #include <strings.h>
@@ -33,7 +36,7 @@
 #include <stdio.h>
 #include <errno.h>
 #include <ctype.h>
-#ifdef illumos
+#if defined(illumos) || defined(_WIN32)
 #include <alloca.h>
 #endif
 #include <libgen.h>
@@ -46,12 +49,17 @@
 #include <dt_string.h>
 #include <dt_module.h>
 
+#ifdef _WIN32
+#include <unistd.h>
+#include <cvconst.h>
+#else
 #ifndef illumos
 #include <sys/sysctl.h>
 #include <unistd.h>
 #include <libproc_compat.h>
 #include <libelf.h>
 #include <gelf.h>
+#endif
 #endif
 
 typedef struct dt_pid_probe {
@@ -233,8 +241,10 @@ dt_pid_sym_filt(void *arg, const GElf_Sym *symp, const char *func)
 {
 	dt_pid_probe_t *pp = arg;
 
+#ifndef _WIN32
 	if (symp->st_shndx == SHN_UNDEF)
 		return (0);
+#endif
 
 	if (symp->st_size == 0) {
 		dt_dprintf("st_size of %s is zero\n", func);
@@ -264,7 +274,7 @@ dt_pid_sym_filt(void *arg, const GElf_Sym *symp, const char *func)
 }
 
 static int
-dt_pid_per_mod(void *arg, const prmap_t *pmp, const char *obj)
+dt_pid_per_mod(void *arg, uint64_t vaddr, const char *obj)
 {
 	dt_pid_probe_t *pp = arg;
 	dtrace_hdl_t *dtp = pp->dpp_dtp;
@@ -276,9 +286,9 @@ dt_pid_per_mod(void *arg, const prmap_t *pmp, const char *obj)
 		return (0);
 
 #ifdef illumos
-	(void) Plmid(pp->dpp_pr, pmp->pr_vaddr, &pp->dpp_lmid);
+	(void) Plmid(pp->dpp_pr, vaddr, &pp->dpp_lmid);
 #endif
-	
+
 
 	if ((pp->dpp_obj = strrchr(obj, '/')) == NULL)
 		pp->dpp_obj = obj;
@@ -337,6 +347,9 @@ dt_pid_per_mod(void *arg, const prmap_t *pmp, const char *obj)
 		if (Pxlookup_by_name(pp->dpp_pr, pp->dpp_lmid, obj,
 		    pp->dpp_func, &sym, NULL) != 0) {
 			if (strcmp("-", pp->dpp_func) == 0) {
+#ifdef _WIN32
+				return 0;
+#else
 				sym.st_name = 0;
 				sym.st_info =
 				    GELF_ST_INFO(STB_LOCAL, STT_FUNC);
@@ -347,6 +360,7 @@ dt_pid_per_mod(void *arg, const prmap_t *pmp, const char *obj)
 				    PR_MODEL_ILP32 ? -1U : -1ULL;
 #else
 				sym.st_size = ~((Elf64_Xword) 0);
+#endif
 #endif
 
 			} else if (!strisglob(pp->dpp_mod)) {
@@ -362,10 +376,15 @@ dt_pid_per_mod(void *arg, const prmap_t *pmp, const char *obj)
 		/*
 		 * Only match defined functions of non-zero size.
 		 */
+#ifdef _WIN32
+		if (sym.st_tag != SymTagFunction) {
+			return (0);
+		}
+#else
 		if (GELF_ST_TYPE(sym.st_info) != STT_FUNC ||
 		    sym.st_shndx == SHN_UNDEF || sym.st_size == 0)
 			return (0);
-
+#endif
 		/*
 		 * We don't instrument PLTs -- they're dynamically rewritten,
 		 * and, so, inherently dicey to instrument.
@@ -401,16 +420,23 @@ dt_pid_per_mod(void *arg, const prmap_t *pmp, const char *obj)
 }
 
 static int
+#ifdef _WIN32
+dt_pid_mod_filt(void *arg, uint64_t vaddr, const char *obj)
+#else
 dt_pid_mod_filt(void *arg, const prmap_t *pmp, const char *obj)
+#endif
 {
 	char name[DTRACE_MODNAMELEN];
 	dt_pid_probe_t *pp = arg;
+#ifndef _WIN32
+	uint64_t vaddr = pmp->pr_vaddr;
+#endif
 
 	if (gmatch(obj, pp->dpp_mod))
-		return (dt_pid_per_mod(pp, pmp, obj));
+		return (dt_pid_per_mod(pp, vaddr, obj));
 
 #ifdef illumos
-	(void) Plmid(pp->dpp_pr, pmp->pr_vaddr, &pp->dpp_lmid);
+	(void) Plmid(pp->dpp_pr, vaddr, &pp->dpp_lmid);
 #else
 	pp->dpp_lmid = 0;
 #endif
@@ -421,27 +447,30 @@ dt_pid_mod_filt(void *arg, const prmap_t *pmp, const char *obj)
 		pp->dpp_obj++;
 
 	if (gmatch(pp->dpp_obj, pp->dpp_mod))
-		return (dt_pid_per_mod(pp, pmp, obj));
+		return (dt_pid_per_mod(pp, vaddr, obj));
 
 #ifdef illumos
-	(void) Plmid(pp->dpp_pr, pmp->pr_vaddr, &pp->dpp_lmid);
+	(void) Plmid(pp->dpp_pr, vaddr, &pp->dpp_lmid);
 #endif
 
 	dt_pid_objname(name, sizeof (name), pp->dpp_lmid, pp->dpp_obj);
 
 	if (gmatch(name, pp->dpp_mod))
-		return (dt_pid_per_mod(pp, pmp, obj));
+		return (dt_pid_per_mod(pp, vaddr, obj));
 
 	return (0);
 }
 
-static const prmap_t *
+static uint64_t
 dt_pid_fix_mod(dtrace_probedesc_t *pdp, struct ps_prochandle *P)
 {
 	char m[MAXPATHLEN];
 	Lmid_t lmid = PR_LMID_EVERY;
 	const char *obj;
+	uint64_t vaddr;
+#ifndef _WIN32
 	const prmap_t *pmp;
+#endif
 
 	/*
 	 * Pick apart the link map from the library name.
@@ -451,35 +480,41 @@ dt_pid_fix_mod(dtrace_probedesc_t *pdp, struct ps_prochandle *P)
 
 		if (strncmp(pdp->dtpd_mod, "LM", 2) != 0 ||
 		    !isdigit(pdp->dtpd_mod[2]))
-			return (NULL);
+			return (0);
 
 		lmid = strtoul(&pdp->dtpd_mod[2], &end, 16);
 
 		obj = end + 1;
 
 		if (*end != '`' || strchr(obj, '`') != NULL)
-			return (NULL);
+			return (0);
 
 	} else {
 		obj = pdp->dtpd_mod;
 	}
 
+#ifdef _WIN32
+	if ((vaddr = Plmid_to_map(P, lmid, obj)) == 0)
+		return (0);
+#else
 	if ((pmp = Plmid_to_map(P, lmid, obj)) == NULL)
 		return (NULL);
+	vaddr = pmp->pr_vaddr;
+#endif
 
-	(void) Pobjname(P, pmp->pr_vaddr, m, sizeof (m));
+	(void) Pobjname(P, vaddr, m, sizeof (m));
 	if ((obj = strrchr(m, '/')) == NULL)
 		obj = &m[0];
 	else
 		obj++;
 
 #ifdef illumos
-	(void) Plmid(P, pmp->pr_vaddr, &lmid);
+	(void) Plmid(P, vaddr, &lmid);
 #endif
 
 	dt_pid_objname(pdp->dtpd_mod, sizeof (pdp->dtpd_mod), lmid, obj);
 
-	return (pmp);
+	return (vaddr);
 }
 
 
@@ -513,6 +548,7 @@ dt_pid_create_pid_probes(dtrace_probedesc_t *pdp, dtrace_hdl_t *dtp,
 	pp.dpp_last_taken = 0;
 
 	if (strcmp(pp.dpp_func, "-") == 0) {
+#ifndef _WIN32
 		const prmap_t *aout, *pmp;
 
 		if (pdp->dtpd_mod[0] == '\0') {
@@ -526,7 +562,7 @@ dt_pid_create_pid_probes(dtrace_probedesc_t *pdp, dtrace_hdl_t *dtp,
 			    "only the a.out module is valid with the "
 			    "'-' function"));
 		}
-
+#endif
 		if (strisglob(pp.dpp_name)) {
 			return (dt_pid_error(dtp, pcb, dpr, NULL, D_PROC_NAME,
 			    "only individual addresses may be specified "
@@ -542,7 +578,7 @@ dt_pid_create_pid_probes(dtrace_probedesc_t *pdp, dtrace_hdl_t *dtp,
 	if (strisglob(pp.dpp_mod)) {
 		ret = Pobject_iter(pp.dpp_pr, dt_pid_mod_filt, &pp);
 	} else {
-		const prmap_t *pmp;
+		uint64_t vaddr;
 		char *obj;
 
 		/*
@@ -550,19 +586,20 @@ dt_pid_create_pid_probes(dtrace_probedesc_t *pdp, dtrace_hdl_t *dtp,
 		 * we'll fail the enabling because the probes don't exist or
 		 * we'll wait for that module to come along.
 		 */
-		if ((pmp = dt_pid_fix_mod(pdp, pp.dpp_pr)) != NULL) {
+		if ((vaddr = dt_pid_fix_mod(pdp, pp.dpp_pr)) != 0) {
 			if ((obj = strchr(pdp->dtpd_mod, '`')) == NULL)
 				obj = pdp->dtpd_mod;
 			else
 				obj++;
 
-			ret = dt_pid_per_mod(&pp, pmp, obj);
+			ret = dt_pid_per_mod(&pp, vaddr, obj);
 		}
 	}
 
 	return (ret);
 }
 
+#ifndef _WIN32
 static int
 dt_pid_usdt_mapping(void *data, const prmap_t *pmp, const char *oname)
 {
@@ -640,11 +677,15 @@ dt_pid_usdt_mapping(void *data, const prmap_t *pmp, const char *oname)
 
 	return (0);
 }
+#endif
 
 static int
 dt_pid_create_usdt_probes(dtrace_probedesc_t *pdp, dtrace_hdl_t *dtp,
     dt_pcb_t *pcb, dt_proc_t *dpr)
 {
+#ifdef _WIN32
+	return (0);
+#else
 	struct ps_prochandle *P = dpr->dpr_proc;
 	int ret = 0;
 
@@ -667,6 +708,7 @@ dt_pid_create_usdt_probes(dtrace_probedesc_t *pdp, dtrace_hdl_t *dtp,
 	(void) dt_pid_fix_mod(pdp, P);
 
 	return (ret);
+#endif
 }
 
 static pid_t
@@ -856,17 +898,20 @@ dt_pid_get_types(dtrace_hdl_t *dtp, const dtrace_probedesc_t *pdp,
 	dt_module_t *dmp;
 	ctf_file_t *fp;
 	ctf_funcinfo_t f;
+	ctf_id_t symid;
 	ctf_id_t argv[32];
+	int i, args;
+	char buf[DTRACE_ARGTYPELEN];
+	int ret = 0;
+	int argc = sizeof (argv) / sizeof (ctf_id_t);
+#ifndef _WIN32
 	GElf_Sym sym;
 	prsyminfo_t si;
 	struct ps_prochandle *p;
-	int i, args;
-	char buf[DTRACE_ARGTYPELEN];
 	const char *mptr;
 	char *eptr;
-	int ret = 0;
-	int argc = sizeof (argv) / sizeof (ctf_id_t);
 	Lmid_t lmid;
+#endif
 
 	/* Set up a potential outcome */
 	args = *nargs;
@@ -896,6 +941,30 @@ dt_pid_get_types(dtrace_hdl_t *dtp, const dtrace_probedesc_t *pdp,
 	 * We may be working with a module that doesn't have ctf. If that's the
 	 * case then we just return now and move on with life.
 	 */
+#ifdef _WIN32
+	dt_module_t *dmpi = dt_module_getctfmod(dtp, dmp, pdp->dtpd_mod);
+	if (dmpi == NULL) {
+		dt_dprintf("no ctf container for  %s\n",
+		    pdp->dtpd_mod);
+		return;
+	}
+
+	fp = dt_module_getctf(dtp, dmpi);
+	if (fp == NULL) {
+		dt_dprintf("no ctf container for  %s\n",
+		    pdp->dtpd_mod);
+		return;
+	}
+
+	symid = dt_module_function_typeid(dmpi, pdp->dtpd_func);
+	if (CTF_ERR == symid) {
+		dt_dprintf("failed to find function %s in %s`%s\n",
+		    pdp->dtpd_func, pdp->dtpd_provider, pdp->dtpd_mod);
+		goto out;
+	}
+
+#else
+
 	fp = dt_module_getctflib(dtp, dmp, pdp->dtpd_mod);
 	if (fp == NULL) {
 		dt_dprintf("no ctf container for  %s\n",
@@ -943,7 +1012,11 @@ dt_pid_get_types(dtrace_hdl_t *dtp, const dtrace_probedesc_t *pdp,
 		    pdp->dtpd_func, pdp->dtpd_provider, pdp->dtpd_mod);
 		goto out;
 	}
-	if (ctf_func_info(fp, si.prs_id, &f) == CTF_ERR) {
+
+	symid = si.prs_id;
+#endif
+
+	if (ctf_func_info(fp, symid, &f) == CTF_ERR) {
 		dt_dprintf("failed to get ctf information for %s in %s`%s\n",
 		    pdp->dtpd_func, pdp->dtpd_provider, pdp->dtpd_mod);
 		goto out;
@@ -978,7 +1051,7 @@ dt_pid_get_types(dtrace_hdl_t *dtp, const dtrace_probedesc_t *pdp,
 		    ret, DTRACE_ARGTYPELEN - ret, buf);
 		*nargs = 2;
 	} else {
-		if (ctf_func_args(fp, si.prs_id, argc, argv) == CTF_ERR)
+		if (ctf_func_args(fp, symid, argc, argv) == CTF_ERR)
 			goto out;
 
 		*nargs = MIN(args, f.ctc_argc);
@@ -994,6 +1067,10 @@ dt_pid_get_types(dtrace_hdl_t *dtp, const dtrace_probedesc_t *pdp,
 		}
 	}
 out:
+#ifndef _WIN32
 	dt_proc_unlock(dtp, p);
 	dt_proc_release(dtp, p);
+#endif
+	return;
 }
+

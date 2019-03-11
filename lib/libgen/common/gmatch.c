@@ -62,8 +62,8 @@ int
 gmatch(const char *s, const char *p)
 {
 	const char	*olds;
-	wchar_t		scc, c;
-	int 		n;
+	wchar_t		c;
+	int 		scc, n;
 	wchar_t		cl;
 
 	olds = s;

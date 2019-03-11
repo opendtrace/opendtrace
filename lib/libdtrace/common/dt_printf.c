@@ -24,6 +24,9 @@
  * Copyright (c) 2013, Joyent, Inc. All rights reserved.
  * Copyright (c) 2013 by Delphix. All rights reserved.
  */
+/*
+ * Portions Copyright Microsoft Corporation.
+ */
 
 #ifdef illumos
 #include <sys/sysmacros.h>
@@ -106,6 +109,7 @@ pfcheck_str(dt_pfargv_t *pfv, dt_pfargd_t *pfd, dt_node_t *dnp)
 	ctf_id_t base;
 	uint_t kind;
 
+
 	if (dt_node_is_string(dnp))
 		return (1);
 
@@ -115,7 +119,9 @@ pfcheck_str(dt_pfargv_t *pfv, dt_pfargd_t *pfd, dt_node_t *dnp)
 
 	return (kind == CTF_K_ARRAY && ctf_array_info(ctfp, base, &r) == 0 &&
 	    (base = ctf_type_resolve(ctfp, r.ctr_contents)) != CTF_ERR &&
-	    ctf_type_encoding(ctfp, base, &e) == 0 && IS_CHAR(e));
+	    ctf_type_kind(ctfp, base) == CTF_K_INTEGER &&
+	    ctf_type_encoding(ctfp, base, &e) == 0 &&
+	    e.cte_bits == NBBY);
 }
 
 /*ARGSUSED*/
@@ -132,7 +138,8 @@ pfcheck_wstr(dt_pfargv_t *pfv, dt_pfargd_t *pfd, dt_node_t *dnp)
 	return (kind == CTF_K_ARRAY && ctf_array_info(ctfp, base, &r) == 0 &&
 	    (base = ctf_type_resolve(ctfp, r.ctr_contents)) != CTF_ERR &&
 	    ctf_type_kind(ctfp, base) == CTF_K_INTEGER &&
-	    ctf_type_encoding(ctfp, base, &e) == 0 && e.cte_bits == 32);
+	    ctf_type_encoding(ctfp, base, &e) == 0 &&
+	    e.cte_bits == (sizeof(wchar_t) * NBBY));
 }
 
 /*ARGSUSED*/
@@ -311,7 +318,8 @@ pfprint_fp(dtrace_hdl_t *dtp, FILE *fp, const char *format,
 		return (dt_printf(dtp, fp, format,
 		    *((double *)addr) / n));
 #if !defined(__arm__) && !defined(__powerpc__) && \
-    !defined(__mips__) && !defined(__riscv)
+    !defined(__mips__) && !defined(__riscv) && \
+    !defined(_WIN32)
 	case sizeof (long double):
 		return (dt_printf(dtp, fp, format,
 		    *((long double *)addr) / ldn));
@@ -521,6 +529,8 @@ pfprint_port(dtrace_hdl_t *dtp, FILE *fp, const char *format,
 
 #ifdef illumos
 	if ((sv = getservbyport_r(port, NULL, &res, buf, sizeof (buf))) != NULL)
+#elif defined(_WIN32)
+	if ((sv = getservbyport(port, NULL)) != NULL)
 #else
 	if (getservbyport_r(port, NULL, &res, buf, sizeof (buf), &sv) > 0)
 #endif
@@ -548,15 +558,21 @@ pfprint_inetaddr(dtrace_hdl_t *dtp, FILE *fp, const char *format,
 #ifdef illumos
 		if ((host = gethostbyaddr_r(inetaddr, NS_INADDRSZ,
 		    AF_INET, &res, buf, sizeof (buf), &e)) != NULL)
+#elif defined(_WIN32)
+#pragma prefast(suppress:38026) // "Domain Names Must Be World Ready"
+		if ((host = gethostbyaddr(inetaddr, NS_INADDRSZ,
+		    AF_INET)) != NULL)
 #else
 		if (gethostbyaddr_r(inetaddr, NS_INADDRSZ,
 		    AF_INET, &res, buf, sizeof (buf), &host, &e) > 0)
 #endif
 			return (dt_printf(dtp, fp, format, host->h_name));
+#ifndef _WIN32
 	} else if (inet_pton(AF_INET6, s, inetaddr) != -1) {
 		if ((host = getipnodebyaddr(inetaddr, NS_IN6ADDRSZ,
 		    AF_INET6, &e)) != NULL)
 			return (dt_printf(dtp, fp, format, host->h_name));
+#endif
 	}
 
 	return (dt_printf(dtp, fp, format, s));
@@ -1567,13 +1583,13 @@ dt_printf_format(dtrace_hdl_t *dtp, FILE *fp, const dt_pfargv_t *pfv,
 		if (width != 0) {
 			ret = snprintf(f, fmtsz, "%d", ABS(width));
 			f += ret;
-			fmtsz = MAX(0, fmtsz - ret);
+			fmtsz = MAX(0, (int)(fmtsz - ret));
 		}
 
 		if (prec > 0) {
 			ret = snprintf(f, fmtsz, ".%d", prec);
 			f += ret;
-			fmtsz = MAX(0, fmtsz - ret);
+			fmtsz = MAX(0, (int)(fmtsz - ret));
 		}
 
 		if (strlcpy(f, pfd->pfd_fmt, fmtsz) >= fmtsz)
@@ -1762,7 +1778,7 @@ dtrace_freopen(dtrace_hdl_t *dtp, FILE *fp, void *fmtdata,
 	 * later.
 	 *
 	 * For FreeBSD we use the concept of setting an output file
-	 * pointer in the DTrace handle if a dtrace_freopen() has 
+	 * pointer in the DTrace handle if a dtrace_freopen() has
 	 * enabled another output file and we leave the caller's
 	 * file pointer untouched. If it was actually stdout, then
 	 * stdout remains open. If it was another file, then that
@@ -1808,7 +1824,7 @@ dtrace_freopen(dtrace_hdl_t *dtp, FILE *fp, void *fmtdata,
 	if ((nfp = fopen(dtp->dt_sprintf_buf, "a")) == NULL) {
 		char *msg = strerror(errno);
 		char *faultstr;
-		int len = 80;
+		size_t len = 80;
 
 		len += strlen(msg) + strlen(dtp->dt_sprintf_buf);
 		faultstr = alloca(len);

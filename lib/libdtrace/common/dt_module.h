@@ -56,8 +56,14 @@ extern dt_ident_t *dt_module_extern(dtrace_hdl_t *, dt_module_t *,
 extern const char *dt_module_modelname(dt_module_t *);
 extern int dt_module_getlibid(dtrace_hdl_t *, dt_module_t *,
     const ctf_file_t *);
+#ifdef _WIN32
+extern dt_module_t *dt_module_getctfmod(dtrace_hdl_t *, dt_module_t *,
+    const char *);
+extern ctf_id_t dt_module_function_typeid(dt_module_t *dmp, const char *name);
+#else
 extern ctf_file_t *dt_module_getctflib(dtrace_hdl_t *, dt_module_t *,
     const char *);
+#endif
 
 #ifdef	__cplusplus
 }

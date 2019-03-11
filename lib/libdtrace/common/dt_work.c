@@ -82,7 +82,7 @@ dtrace_sleep(dtrace_hdl_t *dtp)
 		return; /* sleep duration has already past */
 	}
 
-#ifdef illumos
+#if defined(illumos) || defined(_WIN32)
 	tv.tv_sec = (earliest - now) / NANOSEC;
 	tv.tv_nsec = (earliest - now) % NANOSEC;
 

@@ -419,7 +419,7 @@ dt_flowindent(dtrace_hdl_t *dtp, dtrace_probedata_t *data, dtrace_epid_t last,
 	static const char *e_str[2] = { " -> ", " => " };
 	static const char *r_str[2] = { " <- ", " <= " };
 	static const char *ent = "entry", *ret = "return";
-	static int entlen = 0, retlen = 0;
+	static size_t entlen = 0, retlen = 0;
 	dtrace_epid_t next, id = epd->dtepd_epid;
 	int rval;
 
@@ -710,7 +710,7 @@ dt_print_packed(dtrace_hdl_t *dtp, FILE *fp,
 	static boolean_t utf8;
 	char *ascii = "__xxxxXX";
 	char *neg = "vvvvVV";
-	unsigned int len;
+	size_t len;
 	long double val;
 
 	if (!utf8_checked) {
@@ -1375,7 +1375,9 @@ dt_print_ustack(dtrace_hdl_t *dtp, FILE *fp, const char *format,
 		dt_proc_lock(dtp, P); /* lock handle while we perform lookups */
 
 	for (i = 0; i < depth && pc[i] != 0; i++) {
+#ifndef _WIN32
 		const prmap_t *map;
+#endif
 
 		if ((err = dt_printf(dtp, fp, "%*s", indent, "")) < 0)
 			break;
@@ -1392,6 +1394,7 @@ dt_print_ustack(dtrace_hdl_t *dtp, FILE *fp, const char *format,
 				(void) snprintf(c, sizeof (c),
 				    "%s`%s", dt_basename(objname), name);
 			}
+#ifndef _WIN32
 		} else if (str != NULL && str[0] != '\0' && str[0] != '@' &&
 		    (P != NULL && ((map = Paddr_to_map(P, pc[i])) == NULL ||
 		    (map->pr_mflags & MA_WRITE)))) {
@@ -1409,6 +1412,7 @@ dt_print_ustack(dtrace_hdl_t *dtp, FILE *fp, const char *format,
 			 * case and we refuse to use the string.
 			 */
 			(void) snprintf(c, sizeof (c), "%s", str);
+#endif
 		} else {
 			if (P != NULL && Pobjname(P, pc[i], objname,
 			    sizeof (objname)) != 0) {
@@ -2068,7 +2072,8 @@ int
 dt_setopt(dtrace_hdl_t *dtp, const dtrace_probedata_t *data,
     const char *option, const char *value)
 {
-	int len, rval;
+	size_t len;
+	int rval;
 	char *msg;
 	const char *errstr;
 	dtrace_setoptdata_t optdata;
@@ -2659,7 +2664,7 @@ dt_get_buf(dtrace_hdl_t *dtp, int cpu, dtrace_bufdesc_t **bufp)
 	buf->dtbd_size = size;
 	buf->dtbd_cpu = cpu;
 
-#ifdef illumos
+#if defined(illumos) || defined(_WIN32)
 	if (dt_ioctl(dtp, DTRACEIOC_BUFSNAP, buf) == -1) {
 #else
 	if (dt_ioctl(dtp, DTRACEIOC_BUFSNAP, &buf) == -1) {

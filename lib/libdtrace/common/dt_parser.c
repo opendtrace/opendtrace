@@ -282,6 +282,16 @@ dt_type_pointer(dtrace_typeinfo_t *tip)
 		return (0);
 	}
 
+#ifdef _WIN32
+	ptr = ctf_add_pointer(ctfp, CTF_ADD_ROOT, type);
+	if (ptr == CTF_ERR || ctf_update(ctfp) == CTF_ERR) {
+		dtp->dt_ctferr = ctf_errno(ctfp);
+		return (dt_set_errno(dtp, EDT_CTF));
+	}
+
+	tip->dtt_type = ptr;
+	return (0);
+#else
 	if (yypcb->pcb_idepth != 0)
 		dmp = dtp->dt_cdefs;
 	else
@@ -306,6 +316,7 @@ dt_type_pointer(dtrace_typeinfo_t *tip)
 	tip->dtt_flags = bflags;
 
 	return (0);
+#endif
 }
 
 const char *
@@ -1918,12 +1929,12 @@ dt_cast(dt_node_t *lp, dt_node_t *rp)
 	size_t dstsize = dt_node_type_size(lp);
 
 	if (dstsize < srcsize) {
-		int n = (sizeof (uint64_t) - dstsize) * NBBY;
+		size_t n = (sizeof (uint64_t) - dstsize) * NBBY;
 		rp->dn_value <<= n;
 		rp->dn_value >>= n;
 	} else if (dstsize > srcsize) {
-		int n = (sizeof (uint64_t) - srcsize) * NBBY;
-		int s = (dstsize - srcsize) * NBBY;
+		size_t  n = (sizeof (uint64_t) - srcsize) * NBBY;
+		size_t  s = (dstsize - srcsize) * NBBY;
 
 		rp->dn_value <<= n;
 		if (rp->dn_flags & DT_NF_SIGNED) {

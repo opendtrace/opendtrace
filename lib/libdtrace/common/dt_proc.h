@@ -27,6 +27,9 @@
 /*
  * Copyright (c) 2012 by Delphix. All rights reserved.
  */
+/*
+ * Portions Copyright Microsoft Corporation.
+ */
 
 #ifndef	_DT_PROC_H
 #define	_DT_PROC_H
@@ -34,6 +37,7 @@
 #include <libproc.h>
 #include <dtrace.h>
 #include <pthread.h>
+
 #include <dt_list.h>
 
 #ifdef	__cplusplus
@@ -46,20 +50,30 @@ typedef struct dt_proc {
 	dtrace_hdl_t *dpr_hdl;		/* back pointer to libdtrace handle */
 	struct ps_prochandle *dpr_proc;	/* proc handle for libproc calls */
 	char dpr_errmsg[BUFSIZ];	/* error message */
+#ifndef _WIN32
 	rd_agent_t *dpr_rtld;		/* rtld handle for librtld_db calls */
+#endif
 	pthread_mutex_t dpr_lock;	/* lock for manipulating dpr_hdl */
+#ifdef _WIN32
+	HANDLE dpr_event;		/* thread action signal for dpr_stop/quit/done */
+#else
 	pthread_cond_t dpr_cv;		/* cond for dpr_stop/quit/done */
+#endif
 	pid_t dpr_pid;			/* pid of process */
 	uint_t dpr_refs;		/* reference count */
 	uint8_t dpr_cacheable;		/* cache handle using lru list */
+#ifndef _WIN32
 	uint8_t dpr_stop;		/* stop mask: see flag bits below */
+#endif
 	uint8_t dpr_quit;		/* quit flag: ctl thread should quit */
 	uint8_t dpr_done;		/* done flag: ctl thread has exited */
 	uint8_t dpr_usdt;		/* usdt flag: usdt initialized */
 	uint8_t dpr_stale;		/* proc flag: been deprecated */
 	uint8_t dpr_rdonly;		/* proc flag: opened read-only */
 	pthread_t dpr_tid;		/* control thread (or zero if none) */
+#ifndef _WIN32
 	dt_list_t dpr_bps;		/* list of dt_bkpt_t structures */
+#endif
 } dt_proc_t;
 
 typedef struct dt_proc_notify {

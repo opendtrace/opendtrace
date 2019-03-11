@@ -316,10 +316,10 @@ dt_dis_typestr(const dtrace_diftype_t *t, char *buf, size_t len)
 	if (t->dtdt_flags & (DIF_TF_BYREF | DIF_TF_BYUREF)) {
 		(void) snprintf(buf, len, "%s (%s) by %sref (size %lu)",
 		    kind, ckind, (t->dtdt_flags & DIF_TF_BYUREF) ? "user " : "",
-		    (ulong_t)t->dtdt_size);
+		    (unsigned long)t->dtdt_size);
 	} else {
 		(void) snprintf(buf, len, "%s (%s) (size %lu)",
-		    kind, ckind, (ulong_t)t->dtdt_size);
+		    kind, ckind, (unsigned long)t->dtdt_size);
 	}
 
 	return (buf);
@@ -448,7 +448,7 @@ dt_dis(const dtrace_difo_t *dp, FILE *fp)
 			opcode = 0; /* force invalid opcode message */
 
 		op = &optab[opcode];
-		(void) fprintf(fp, "%02lu: %08x    ", i, instr);
+		(void) fprintf(fp, "%02lu: %08x    ", (unsigned long)i, instr);
 		op->op_func(dp, op->op_name, instr, fp);
 		(void) fprintf(fp, "\n");
 	}

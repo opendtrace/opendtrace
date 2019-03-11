@@ -484,8 +484,8 @@ dt_cg_typecast(const dt_node_t *src, const dt_node_t *dst,
 	rg = dt_regset_alloc(drp);
 
 	if (dstsize > srcsize) {
-		int n = sizeof (uint64_t) * NBBY - srcsize * NBBY;
-		int s = (dstsize - srcsize) * NBBY;
+		size_t n = sizeof (uint64_t) * NBBY - srcsize * NBBY;
+		size_t s = (dstsize - srcsize) * NBBY;
 
 		dt_cg_setx(dlp, rg, n);
 
@@ -510,7 +510,7 @@ dt_cg_typecast(const dt_node_t *src, const dt_node_t *dst,
 			    dt_cg_node_alloc(DT_LBL_NONE, instr));
 		}
 	} else if (dstsize != sizeof (uint64_t)) {
-		int n = sizeof (uint64_t) * NBBY - dstsize * NBBY;
+		size_t n = sizeof (uint64_t) * NBBY - dstsize * NBBY;
 
 		dt_cg_setx(dlp, rg, n);
 
@@ -1231,7 +1231,8 @@ dt_cg_array_op(dt_node_t *dnp, dt_irlist_t *dlp, dt_regset_t *drp)
 	dif_instr_t instr;
 	uint_t op;
 	size_t size;
-	int reg, n;
+	int reg;
+	size_t n;
 
 	assert(dnp->dn_kind == DT_NODE_VAR);
 	assert(!(idp->di_flags & DT_IDFLG_LOCAL));

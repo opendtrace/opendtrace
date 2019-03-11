@@ -69,7 +69,7 @@ dtrace_handle_err(dtrace_hdl_t *dtp, dtrace_handle_err_f *hdlr, void *arg)
 	if (dtp->dt_options[DTRACEOPT_GRABANON] != DTRACEOPT_UNSET)
 		goto out;
 
-	if ((pgp = dtrace_program_strcompile(dtp, _dt_errprog,
+	if ((pgp = dt_program_strcompile(dtp, _dt_errprog,
 	    DTRACE_PROBESPEC_NAME, DTRACE_C_ZDEFS, 0, NULL)) == NULL)
 		return (dt_set_errno(dtp, dtrace_errno(dtp)));
 
@@ -158,7 +158,7 @@ dt_handle_err(dtrace_hdl_t *dtp, dtrace_probedata_t *data)
 	const int slop = 80;
 	const char *faultstr;
 	char *str;
-	int len;
+	size_t len;
 
 	assert(epd->dtepd_uarg == DT_ECB_ERROR);
 
@@ -241,7 +241,7 @@ dt_handle_liberr(dtrace_hdl_t *dtp, const dtrace_probedata_t *data,
 	dtrace_errdata_t err;
 	const int slop = 80;
 	char *str;
-	int len;
+	size_t len;
 
 	err.dteda_edesc = data->dtpda_edesc;
 	err.dteda_pdesc = errpd;
@@ -314,7 +314,7 @@ dt_handle_cpudrop(dtrace_hdl_t *dtp, processorid_t cpu,
 {
 	dtrace_dropdata_t drop;
 	char str[80], *s;
-	int size;
+	size_t size;
 
 	assert(what == DTRACEDROP_PRINCIPAL || what == DTRACEDROP_AGGREGATION);
 
@@ -395,7 +395,7 @@ dt_handle_status(dtrace_hdl_t *dtp, dtrace_status_t *old, dtrace_status_t *new)
 	dtrace_dropdata_t drop;
 	char str[80], *s;
 	uintptr_t base = (uintptr_t)new, obase = (uintptr_t)old;
-	int i, size;
+	size_t i, size;
 
 	bzero(&drop, sizeof (drop));
 	drop.dtdda_handle = dtp;

@@ -23,6 +23,9 @@
  * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Copyright (c) 2011, Joyent Inc. All rights reserved.
  */
+/*
+ * Portions Copyright Microsoft Corporation.
+ */
 
 #pragma ident	"%Z%%M%	%I%	%E% SMI"
 
@@ -206,7 +209,7 @@ dt_pragma_binding(const char *prname, dt_node_t *dnp)
 		dtp->dt_globals->dh_defer = &dt_pragma_apply;
 }
 
-static void 
+static void
 dt_pragma_depends_finddep(dtrace_hdl_t *dtp, const char *lname, char *lib,
     size_t len)
 {
@@ -258,6 +261,9 @@ dt_pragma_depends(const char *prname, dt_node_t *cnp)
 		 * we're not running as root.
 		 */
 		provs = NULL;
+#if defined(_WIN32)
+		/* This is currently not implemented for Win32 */
+#else
 		if (sysctlbyname("debug.dtrace.providers", NULL, &plen, NULL, 0) ||
 		    ((provs = dt_alloc(dtp, plen)) == NULL) ||
 		    sysctlbyname("debug.dtrace.providers", provs, &plen, NULL, 0))
@@ -273,6 +279,7 @@ dt_pragma_depends(const char *prname, dt_node_t *cnp)
 				found = dt_provider_lookup(dtp,
 				    nnp->dn_string) != NULL;
 		}
+#endif
 		if (provs != NULL)
 			dt_free(dtp, provs);
 	} else if (strcmp(cnp->dn_string, "module") == 0) {

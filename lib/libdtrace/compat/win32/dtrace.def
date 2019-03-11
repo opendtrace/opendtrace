@@ -1,0 +1,76 @@
+;/*
+; * CDDL HEADER START
+; *
+; * The contents of this file are subject to the terms of the
+; * Common Development and Distribution License (the "License").
+; * You may not use this file except in compliance with the License.
+; *
+; * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
+; * or http://www.opensolaris.org/os/licensing.
+; * See the License for the specific language governing permissions
+; * and limitations under the License.
+; *
+; * When distributing Covered Code, include this CDDL HEADER in each
+; * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
+; * If applicable, add the following below this CDDL HEADER, with the
+; * fields enclosed by brackets "[]" replaced with your own identifying
+; * information: Portions Copyright [yyyy] [name of copyright owner]
+; *
+; * CDDL HEADER END
+; */
+
+
+EXPORTS
+
+        dtrace_open
+        dtrace_close
+        
+        dtrace_go
+        dtrace_stop
+        dtrace_sleep
+        
+        dtrace_errno
+        dtrace_errmsg
+        
+        dtrace_setopt
+        dtrace_getopt
+        
+        dtrace_program_strcompile
+        dtrace_program_fcompile
+        dtrace_program_exec
+        dtrace_program_info
+        dtrace_program_link
+        dtrace_program_header
+        
+        dtrace_dof_create
+        dtrace_dof_destroy
+        dtrace_getopt_dof
+        dtrace_geterr_dof
+
+        dtrace_stmt_iter
+
+        dtrace_work
+        dtrace_handle_err
+        dtrace_handle_drop
+        dtrace_handle_proc
+        dtrace_handle_buffered
+        dtrace_handle_setopt
+
+        dtrace_aggregate_print
+
+        dtrace_proc_create
+        dtrace_proc_grab
+        dtrace_proc_continue
+
+        dtrace_probe_iter
+        dtrace_probe_info
+
+        dtrace_stability_name
+        dtrace_class_name
+
+        dtrace_version
+
+        ctf_type_name
+
+        proc_gethandle
+        proc_getpid

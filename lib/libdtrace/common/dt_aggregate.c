@@ -28,6 +28,9 @@
  * Copyright (c) 2013, Joyent, Inc. All rights reserved.
  * Copyright (c) 2012 by Delphix. All rights reserved.
  */
+/*
+ * Portions Copyright Microsoft Corporation.
+ */
 
 #include <stdlib.h>
 #include <strings.h>
@@ -358,8 +361,11 @@ dt_aggregate_umod(dtrace_hdl_t *dtp, uint64_t *data)
 	uint64_t pid = data[0];
 	uint64_t *pc = &data[1];
 	struct ps_prochandle *P;
+#ifdef _WIN32
+	uint64_t vaddr;
+#else
 	const prmap_t *map;
-
+#endif
 	if (dtp->dt_vector != NULL)
 		return;
 
@@ -368,8 +374,13 @@ dt_aggregate_umod(dtrace_hdl_t *dtp, uint64_t *data)
 
 	dt_proc_lock(dtp, P);
 
+#ifdef _WIN32
+	if ((vaddr = Paddr_to_map(P, *pc)) != 0)
+		*pc = vaddr;
+#else
 	if ((map = Paddr_to_map(P, *pc)) != NULL)
 		*pc = map->pr_vaddr;
+#endif
 
 	dt_proc_unlock(dtp, P);
 	dt_proc_release(dtp, P);
@@ -405,10 +416,17 @@ dt_aggregate_mod(dtrace_hdl_t *dtp, uint64_t *data)
 
 	for (dmp = dt_list_next(&dtp->dt_modlist); dmp != NULL;
 	    dmp = dt_list_next(dmp)) {
+#ifdef _WIN32
+		if (*pc - dmp->dm_image_base < dmp->dm_image_size) {
+			*pc = dmp->dm_image_base;
+			return;
+		}
+#else
 		if (*pc - dmp->dm_text_va < dmp->dm_text_size) {
 			*pc = dmp->dm_text_va;
 			return;
 		}
+#endif
 	}
 }
 
@@ -453,7 +471,7 @@ dt_aggregate_snap_cpu(dtrace_hdl_t *dtp, processorid_t cpu)
 
 	buf->dtbd_cpu = cpu;
 
-#ifdef illumos
+#if defined(illumos) || defined(_WIN32)
 	if (dt_ioctl(dtp, DTRACEIOC_AGGSNAP, buf) == -1) {
 #else
 	if (dt_ioctl(dtp, DTRACEIOC_AGGSNAP, &buf) == -1) {
@@ -959,6 +977,9 @@ dt_aggregate_valkeycmp(const void *lhs, const void *rhs)
 }
 
 static int
+#ifdef _MSC_VER
+__cdecl
+#endif
 dt_aggregate_keyvarcmp(const void *lhs, const void *rhs)
 {
 	int rval;
@@ -970,6 +991,9 @@ dt_aggregate_keyvarcmp(const void *lhs, const void *rhs)
 }
 
 static int
+#ifdef _MSC_VER
+__cdecl
+#endif
 dt_aggregate_varkeycmp(const void *lhs, const void *rhs)
 {
 	int rval;
@@ -981,6 +1005,9 @@ dt_aggregate_varkeycmp(const void *lhs, const void *rhs)
 }
 
 static int
+#ifdef _MSC_VER
+__cdecl
+#endif
 dt_aggregate_valvarcmp(const void *lhs, const void *rhs)
 {
 	int rval;
@@ -992,6 +1019,9 @@ dt_aggregate_valvarcmp(const void *lhs, const void *rhs)
 }
 
 static int
+#ifdef _MSC_VER
+__cdecl
+#endif
 dt_aggregate_varvalcmp(const void *lhs, const void *rhs)
 {
 	int rval;
@@ -1003,30 +1033,45 @@ dt_aggregate_varvalcmp(const void *lhs, const void *rhs)
 }
 
 static int
+#ifdef _MSC_VER
+__cdecl
+#endif
 dt_aggregate_keyvarrevcmp(const void *lhs, const void *rhs)
 {
 	return (dt_aggregate_keyvarcmp(rhs, lhs));
 }
 
 static int
+#ifdef _MSC_VER
+__cdecl
+#endif
 dt_aggregate_varkeyrevcmp(const void *lhs, const void *rhs)
 {
 	return (dt_aggregate_varkeycmp(rhs, lhs));
 }
 
 static int
+#ifdef _MSC_VER
+__cdecl
+#endif
 dt_aggregate_valvarrevcmp(const void *lhs, const void *rhs)
 {
 	return (dt_aggregate_valvarcmp(rhs, lhs));
 }
 
 static int
+#ifdef _MSC_VER
+__cdecl
+#endif
 dt_aggregate_varvalrevcmp(const void *lhs, const void *rhs)
 {
 	return (dt_aggregate_varvalcmp(rhs, lhs));
 }
 
 static int
+#ifdef _MSC_VER
+__cdecl
+#endif
 dt_aggregate_bundlecmp(const void *lhs, const void *rhs)
 {
 	dt_ahashent_t **lh = *((dt_ahashent_t ***)lhs);
@@ -1250,7 +1295,11 @@ dt_aggwalk_rval(dtrace_hdl_t *dtp, dt_ahashent_t *h, int rval)
 
 void
 dt_aggregate_qsort(dtrace_hdl_t *dtp, void *base, size_t nel, size_t width,
-    int (*compar)(const void *, const void *))
+    int (
+#ifdef _MSC_VER
+	__cdecl
+#endif
+	 *compar)(const void *, const void *))
 {
 	int rev = dt_revsort, key = dt_keysort, keypos = dt_keypos;
 	dtrace_optval_t keyposopt = dtp->dt_options[DTRACEOPT_AGGSORTKEYPOS];
@@ -1528,7 +1577,11 @@ dt_aggregate_minmaxbin(dtrace_hdl_t *dtp, boolean_t clear)
 static int
 dt_aggregate_walk_sorted(dtrace_hdl_t *dtp,
     dtrace_aggregate_f *func, void *arg,
-    int (*sfunc)(const void *, const void *))
+    int (
+#ifdef _MSC_VER
+__cdecl
+#endif
+	 *sfunc)(const void *, const void *))
 {
 	dt_aggregate_t *agp = &dtp->dt_aggregate;
 	dt_ahashent_t *h, **sorted;
@@ -1814,7 +1867,7 @@ dtrace_aggregate_walk_joined(dtrace_hdl_t *dtp, dtrace_aggvarid_t *aggvars,
 				dtrace_aggdesc_t *agg;
 				dtrace_aggdata_t *aggdata;
 
-				if (dt_aggid_lookup(dtp, j, &agg) != 0)
+				if (dt_aggid_lookup(dtp, (dtrace_aggid_t)j, &agg) != 0)
 					break;
 
 				if (agg->dtagd_varid != aggvar)
@@ -2011,7 +2064,7 @@ dtrace_aggregate_walk_joined(dtrace_hdl_t *dtp, dtrace_aggvarid_t *aggvars,
 			goto out;
 		}
 
-		for (j = start; j < i; j++) {
+		for (j = (int)start; j < i; j++) {
 			dtrace_aggvarid_t id = dt_aggregate_aggvarid(sorted[j]);
 
 			assert(id <= max);

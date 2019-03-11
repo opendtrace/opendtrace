@@ -26,8 +26,12 @@
  * Copyright (c) 2013, Joyent, Inc.  All rights reserved.
  * Copyright (c) 2016, Pedro Giffuni.  All rights reserved.
  */
+/*
+ * Portions Copyright Microsoft Corporation.
+ */
 
 #include <sys/types.h>
+#ifndef _WIN32
 #ifdef illumos
 #include <sys/modctl.h>
 #include <sys/kobj.h>
@@ -41,7 +45,7 @@
 #include <sys/module.h>
 #include <sys/stat.h>
 #endif
-
+#endif
 #include <unistd.h>
 #ifdef illumos
 #include <project.h>
@@ -53,7 +57,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <dirent.h>
-#ifndef illumos
+#if !defined(illumos) && !defined(_WIN32)
 #include <fcntl.h>
 #include <libproc_compat.h>
 #endif
@@ -61,6 +65,1115 @@
 #include <dt_strtab.h>
 #include <dt_module.h>
 #include <dt_impl.h>
+
+#ifdef _WIN32
+
+#include <cvconst.h>
+#include <oaidl.h>
+
+
+struct dt_strmap_table_entry {
+    struct dt_strmap_table_entry* next;
+    char string[1];
+};
+
+struct dt_strmap_table {
+    intptr_t buckets;
+    struct dt_strmap_table_entry* entries[1];
+};
+
+static void*
+dt_strmap_create(int buckets)
+{
+	size_t size =
+		sizeof(intptr_t) +
+		sizeof(struct dt_strmap_table_entry*) * buckets;
+
+	struct dt_strmap_table* table = malloc(size);
+	if (NULL != table) {
+		memset(table, 0, size);
+		table->buckets = buckets;
+	}
+
+	return table;
+}
+
+static void
+dt_strmap_destroy(void* map)
+{
+	struct dt_strmap_table* table = (struct dt_strmap_table*)map;
+	int i;
+	for (i = 0; i < table->buckets; i++) {
+		struct dt_strmap_table_entry* entry = table->entries[i];
+		struct dt_strmap_table_entry* next;
+		while (NULL != entry) {
+			next = entry->next;
+			free(entry);
+			entry = next;
+		}
+	}
+
+	free(table);
+	return;
+}
+
+static const char*
+dt_strmap_add(void* map, const char* str)
+{
+	struct dt_strmap_table* table = (struct dt_strmap_table*)map;
+	ulong_t hash = dt_strtab_hash(str, NULL);
+	struct dt_strmap_table_entry* p;
+	struct dt_strmap_table_entry** pentry =
+	    &table->entries[hash % table->buckets];
+
+	while (NULL != (p = *pentry)) {
+		if (!strcmp(str, p->string)) {
+			return p->string;
+		}
+
+		pentry = &p->next;
+	}
+
+	p = malloc(sizeof(struct dt_strmap_table_entry*) + strlen(str) + 1);
+	if (NULL == p) {
+		return NULL;
+	}
+
+	p->next = NULL;
+	strcpy(p->string, str);
+	*pentry = p;
+	return p->string;
+}
+
+struct dt_idmap {
+	int growby;
+	int size;
+	_Field_size_opt_(size) uint32_t* p2c;
+};
+
+static void
+dt_idmap_destroy(void* pmap)
+{
+	struct dt_idmap* map = (struct dt_idmap*)pmap;
+	assert(NULL != map);
+
+	if (NULL != map->p2c) {
+		free(map->p2c);
+	}
+	free(map);
+	return;
+}
+
+static void*
+dt_idmap_create(int growby)
+{
+	struct dt_idmap* map;
+	uint32_t i;
+
+	map = malloc(sizeof(struct dt_idmap));
+	if (NULL == map) {
+		goto exit;
+	}
+
+	map->growby = map->size = growby;
+	map->p2c = malloc(map->size * sizeof(uint32_t));
+	if (NULL == map->p2c) {
+		dt_idmap_destroy(map);
+		map = NULL;
+		goto exit;
+	}
+
+	for (i = 0; i < map->size; i++) {
+		map->p2c[i] = CTF_ERR;
+	}
+
+exit:
+	return map;
+}
+
+static int
+dt_idmap_add(void* pmap, ULONG PdbIndex, ctf_id_t id)
+{
+	struct dt_idmap* map = (struct dt_idmap*)pmap;
+	uint32_t idmax = PdbIndex;
+	uint32_t *p2cnew;
+	uint32_t i;
+
+	assert(CTF_ERR != id);
+
+	if (idmax >= map->size) {
+		idmax += map->growby;
+		if (idmax < map->size) {
+			return -1;
+		}
+		p2cnew = realloc(map->p2c, idmax * sizeof(uint32_t));
+		if (NULL == p2cnew) {
+			return -1;
+		}
+
+		for (i = map->size; i < idmax; i += 1) {
+			p2cnew[i] = CTF_ERR;
+		}
+
+		map->p2c = p2cnew;
+		map->size = idmax;
+	}
+
+	_Analysis_assume_(PdbIndex < map->size);
+	map->p2c[PdbIndex] = id;
+	return 0;
+}
+
+static ctf_id_t
+dt_idmap_p2c(void* pmap, ULONG PdbIndex)
+{
+	struct dt_idmap* map = (struct dt_idmap*)pmap;
+	assert(NULL != map);
+	if (PdbIndex >= map->size) {
+		return CTF_ERR;
+	}
+	return map->p2c[PdbIndex];
+}
+
+static uint_t
+dt_module_syminit(dt_module_t *dmp)
+{
+	if (-1 == dmp->dm_symbol_base) {
+		return 0;
+	}
+
+	if (0 == dmp->dm_symbol_base) {
+		BOOL RedirectionDisabled;
+		PVOID OldRedirectionDisabled;
+		RedirectionDisabled = Wow64DisableWow64FsRedirection(&OldRedirectionDisabled);
+		dmp->dm_symbol_base = SymLoadModuleEx(dmp->dm_prochandle,
+						      NULL,
+						      dmp->dm_file,
+						      NULL,
+						      dmp->dm_image_base,
+						      0,
+						      NULL,
+						      0);
+		if (RedirectionDisabled) {
+			Wow64RevertWow64FsRedirection(OldRedirectionDisabled);
+		}
+		if (0 == dmp->dm_symbol_base) {
+			return 0;
+		}
+	}
+
+	if (NULL == dmp->dm_strmap) {
+		dmp->dm_strmap = dt_strmap_create(_dtrace_strbuckets);
+		if (NULL == dmp->dm_strmap) {
+			return 0;
+		}
+	}
+
+	if (NULL == dmp->dm_idmap) {
+		dmp->dm_idmap = dt_idmap_create(_dtrace_strbuckets);
+		if (NULL == dmp->dm_idmap) {
+			return 0;
+		}
+	}
+
+	return 1;
+}
+
+static GElf_Sym *
+dt_module_symlookup(dt_module_t *dmp, GElf_Addr addr, const char *name,
+    GElf_Sym *symp, uint_t *idp)
+{
+	struct {
+		SYMBOL_INFO s;
+		char buf[256];
+	} sym = {0};
+	DWORD64 disp;
+
+	if (!dt_module_syminit(dmp)) {
+		return NULL;
+	}
+
+	sym.s.SizeOfStruct = sizeof(SYMBOL_INFO);
+	sym.s.MaxNameLen = sizeof(sym.buf);
+
+	if (NULL == name) {
+		addr = dmp->dm_symbol_base + (addr - dmp->dm_image_base);
+		if (!SymFromAddr(dmp->dm_prochandle, addr, &disp, &sym.s)) {
+			dt_dprintf("failed to locate symbol at %p in '%s'\n",
+				   (void*)(intptr_t)addr, dmp->dm_file);
+			return NULL;
+		}
+	} else {
+		if (!SymFromName(dmp->dm_prochandle, name, &sym.s)) {
+			dt_dprintf("failed to locate symbol '%s' in '%s'\n",
+				   name, dmp->dm_file);
+			return NULL;
+		}
+	}
+
+	symp->st_namep = dt_strmap_add(dmp->dm_strmap, sym.s.Name);
+	if (NULL == symp->st_namep) {
+		return NULL;
+	}
+
+	symp->st_value = dmp->dm_image_base + (sym.s.Address - sym.s.ModBase);
+	symp->st_size = sym.s.Size;
+	symp->st_type_idx = sym.s.TypeIndex;
+	symp->st_tag = sym.s.Tag;
+	*idp = sym.s.Index;
+
+	return symp;
+}
+
+static GElf_Sym *
+dt_module_symaddr(dt_module_t *dmp, GElf_Addr addr,
+    GElf_Sym *symp, uint_t *idp)
+{
+	return dt_module_symlookup(dmp, addr, NULL, symp, idp);
+}
+
+static GElf_Sym *
+dt_module_symname(dt_module_t *dmp, const char *name,
+    GElf_Sym *symp, uint_t *idp)
+{
+	return dt_module_symlookup(dmp, 0, name, symp, idp);
+}
+
+static ctf_id_t
+dt_module_import_type(dt_module_t *dmp, const char *name, ULONG typeIdx);
+
+static char*
+dt_module_symbol_name(dt_module_t *dmp, uint32_t type_idx, void** nameStorage)
+{
+	WCHAR* symNameW = NULL;
+	char* symName;
+	int i;
+
+	if (!SymGetTypeInfo(dmp->dm_prochandle, dmp->dm_symbol_base, type_idx,
+			    TI_GET_SYMNAME, &symNameW) ||
+	    (NULL == symNameW)) {
+
+		dt_dprintf("failed to locate symbol by type %d in '%s'\n",
+			   type_idx, dmp->dm_file);
+		*nameStorage = NULL;
+		return NULL;
+	}
+
+	symName = (char*)symNameW;
+	for (i = 0; ; i += 1) {
+		if (0 == (symName[i] = (char)symNameW[i])) {
+			break;
+		}
+	}
+
+	*nameStorage = symNameW;
+	return symName;
+}
+
+static ctf_id_t
+dt_module_import_basetype(dt_module_t *dmp, ULONG typeIdx)
+{
+	ULONG baseType;
+	ULONG64 length;
+	ctf_id_t symIdx = CTF_ERR;
+	ctf_encoding_t enc = {0};
+	uint_t kind;
+	char* name;
+        int sign = 0;
+
+	if (!SymGetTypeInfo(dmp->dm_prochandle, dmp->dm_symbol_base, typeIdx,
+			    TI_GET_BASETYPE, &baseType)) {
+		dt_dprintf("failed to get basetype for type %d in '%s'\n",
+			   typeIdx, dmp->dm_file);
+		goto exit;
+	}
+
+	if (!SymGetTypeInfo(dmp->dm_prochandle, dmp->dm_symbol_base, typeIdx,
+			    TI_GET_LENGTH, &length)) {
+		dt_dprintf("failed to get size for type %d in '%s'\n",
+			   typeIdx, dmp->dm_file);
+		goto exit;
+	}
+
+	switch (baseType) {
+	case btWChar:
+	case btChar:
+		enc.cte_format = CTF_INT_SIGNED | CTF_INT_CHAR;
+		enc.cte_bits = length * 8;
+		switch (length) {
+		case 1:
+			name = "char";
+			break;
+
+		case 2:
+			name = "wchar_t";
+			break;
+
+		default:
+			dt_dprintf("failed to import base type %08lx length %08lx\n", baseType, length);
+			goto exit;
+		}
+
+		symIdx = ctf_add_integer(dmp->dm_ctfp, CTF_ADD_ROOT, name, &enc);
+		break;
+
+	case btVoid:
+	case btInt:
+	case btLong:
+		enc.cte_format = CTF_INT_SIGNED;
+		sign = 1;
+	case btUInt:
+	case btULong:
+		assert(((btULong != baseType) && (btLong != baseType)) || (length == 4));
+		enc.cte_bits = length * 8;
+		switch (length) {
+		case 0:
+			name = "void";
+			break;
+
+		case 1:
+			name = sign ? "char" : "unsigned char";
+			enc.cte_format |= CTF_INT_CHAR;
+			break;
+
+		case 2:
+			name = sign ? "short" : "unsigned short";
+			break;
+
+		case 4:
+			name = sign ? "long" : "unsigned long";
+			break;
+
+		case 8:
+			name = sign ? "long long" : "unsigned long long";
+			break;
+
+		default:
+			dt_dprintf("failed to import base type %08lx length %08lx\n", baseType, length);
+			goto exit;
+		}
+
+		symIdx = ctf_add_integer(dmp->dm_ctfp, CTF_ADD_ROOT, name, &enc);
+		break;
+
+	case btFloat :
+		enc.cte_bits = length * 8;
+		switch (length) {
+		case 4:
+			name = "float";
+			enc.cte_format = CTF_FP_SINGLE;
+			break;
+
+		case 8:
+			enc.cte_format = CTF_FP_DOUBLE;
+			name = "double";
+			break;
+
+		default:
+			dt_dprintf("failed to import base type %08lx length %08lx\n", baseType, length);
+			goto exit;
+		}
+
+		symIdx = ctf_add_float(dmp->dm_ctfp, CTF_ADD_ROOT, name, &enc);
+		break;
+
+	case btBool:
+		enc.cte_format = CTF_INT_BOOL;
+		enc.cte_bits = length * 8;
+		switch (length) {
+		case 1:
+			name = "bool";
+			break;
+
+		case 4:
+			name = "BOOL";
+			break;
+
+		default:
+			dt_dprintf("failed to import base type %08lx length %08lx\n", baseType, length);
+			goto exit;
+		}
+
+		symIdx = ctf_add_integer(dmp->dm_ctfp, CTF_ADD_ROOT, name, &enc);
+		break;
+
+	case btHresult:
+		enc.cte_format = CTF_INT_SIGNED;
+		enc.cte_bits = 32;
+		symIdx = ctf_add_integer(dmp->dm_ctfp, CTF_ADD_ROOT, "HRESULT", &enc);
+		break;
+
+	default:
+		dt_dprintf("failed to import base type %08lx length %08lx\n", baseType, length);
+		goto exit;
+	}
+
+	if (CTF_ERR == symIdx) {
+		goto exit;
+	}
+
+	if (0 != dt_idmap_add(dmp->dm_idmap, typeIdx, symIdx)) {
+		ctf_delete_type(dmp->dm_ctfp, symIdx);
+		symIdx = CTF_ERR;
+		goto exit;
+	}
+
+exit:
+	return symIdx;
+}
+
+static ctf_id_t
+dt_module_import_bitfield(dt_module_t *dmp, ULONG typeIdx)
+{
+	ULONG bitPos;
+	ULONG64 bitLength;
+	ctf_id_t typeId = CTF_ERR;
+	ctf_encoding_t enc = {0};
+
+	if (!SymGetTypeInfo(dmp->dm_prochandle, dmp->dm_symbol_base, typeIdx,
+			    TI_GET_BITPOSITION, &bitPos)) {
+		goto exit;
+	}
+
+	if (!SymGetTypeInfo(dmp->dm_prochandle, dmp->dm_symbol_base, typeIdx,
+			    TI_GET_LENGTH, &bitLength)) {
+		dt_dprintf("failed to get bitfield length for type %d in '%s'\n",
+			   typeIdx, dmp->dm_file);
+		goto exit;
+	}
+
+	enc.cte_offset = bitPos;
+	enc.cte_bits = bitLength;
+	typeId = ctf_add_integer(dmp->dm_ctfp, CTF_ADD_ROOT, NULL, &enc);
+	if (CTF_ERR == typeId) {
+		goto exit;
+	}
+
+	ctf_update(dmp->dm_ctfp);
+
+exit:
+	return typeId;
+}
+
+static ctf_id_t
+dt_module_import_udt(dt_module_t *dmp, ULONG typeIdx)
+{
+	char* symName;
+	void* nameStorage = NULL;
+	ctf_id_t symIdx = CTF_ERR;
+	ctf_id_t symIdxChild;
+	TI_FINDCHILDREN_PARAMS* children = NULL;
+	ULONG childCount;
+	ULONG childIdx;
+	ULONG childTypeIdx;
+	ULONG childOffset;
+	ULONG i;
+	ULONG udtKind;
+	ULONG64 offset;
+
+	symName = dt_module_symbol_name(dmp, typeIdx, &nameStorage);
+
+	if (!SymGetTypeInfo(dmp->dm_prochandle, dmp->dm_symbol_base, typeIdx,
+			    TI_GET_UDTKIND, &udtKind)) {
+		dt_dprintf("failed to get udt kind for type %d in '%s'\n",
+			   typeIdx, dmp->dm_file);
+		goto exit;
+	}
+
+	switch (udtKind) {
+	case UdtStruct:
+	case UdtClass:
+	case UdtInterface:
+		symIdx = ctf_add_struct(dmp->dm_ctfp, CTF_ADD_ROOT, symName);
+		break;
+
+	case UdtUnion:
+		symIdx = ctf_add_union(dmp->dm_ctfp, CTF_ADD_ROOT, symName);
+		break;
+
+	default:
+		goto exit;
+	}
+
+	if (CTF_ERR == symIdx) {
+		goto exit;
+	}
+
+	if (0 != dt_idmap_add(dmp->dm_idmap, typeIdx, symIdx)) {
+		ctf_delete_type(dmp->dm_ctfp, symIdx);
+		symIdx = CTF_ERR;
+		goto exit;
+	}
+
+	if (NULL != nameStorage) {
+		LocalFree(nameStorage);
+		nameStorage = NULL;
+	}
+
+	if (!SymGetTypeInfo(dmp->dm_prochandle, dmp->dm_symbol_base, typeIdx,
+			    TI_GET_CHILDRENCOUNT, &childCount) || (0 == childCount)) {
+
+		goto exit;
+	}
+
+	children = malloc(sizeof(TI_FINDCHILDREN_PARAMS) + childCount * sizeof(ULONG));
+	if (NULL == children) {
+		goto exit;
+	}
+
+	children->Count = childCount;
+	children->Start = 0;
+
+	if (!SymGetTypeInfo(dmp->dm_prochandle, dmp->dm_symbol_base, typeIdx,
+			    TI_FINDCHILDREN, children)) {
+		dt_dprintf("failed to get fields for type %d in '%s'\n",
+			   typeIdx, dmp->dm_file);
+		goto exit;
+	}
+
+	for (i = 0; i < childCount; i++) {
+		childIdx = children->ChildId[i];
+
+		if (!SymGetTypeInfo(dmp->dm_prochandle, dmp->dm_symbol_base, childIdx,
+				TI_GET_OFFSET, &childOffset)) {
+			continue;
+		}
+
+		if (!SymGetTypeInfo(dmp->dm_prochandle, dmp->dm_symbol_base, childIdx,
+				TI_GET_TYPEID, &childTypeIdx)) {
+			dt_dprintf("failed to get type for child %d of type %d in '%s'\n",
+				   childIdx, typeIdx, dmp->dm_file);
+			goto exit;
+		}
+
+		symIdxChild = dt_module_import_bitfield(dmp, childIdx);
+		if (CTF_ERR == symIdxChild) {
+			symIdxChild = dt_module_import_type(dmp, NULL, childTypeIdx);
+			if (CTF_ERR == symIdxChild) {
+				goto exit;
+			}
+		}
+
+		symName = dt_module_symbol_name(dmp, childIdx, &nameStorage);
+
+		if (0 != ctf_add_member_at(dmp->dm_ctfp, symIdx, symName,
+					   symIdxChild, childOffset)) {
+			goto exit;
+		}
+
+		LocalFree(nameStorage);
+		nameStorage = NULL;
+	}
+
+exit:
+	if (NULL != nameStorage) {
+		LocalFree(nameStorage);
+	}
+
+	if (NULL != children) {
+		free(children);
+	}
+
+	return symIdx;
+}
+
+static ctf_id_t
+dt_module_import_typedef(dt_module_t *dmp, ULONG typeIdx)
+{
+	char* symName;
+	void* nameStorage = NULL;
+	ctf_id_t symIdx = CTF_ERR;
+	ctf_id_t symIdxType;
+	ULONG typeIdxType;
+
+	if (!SymGetTypeInfo(dmp->dm_prochandle, dmp->dm_symbol_base, typeIdx,
+			    TI_GET_TYPEID, &typeIdxType)) {
+		dt_dprintf("failed to get typedef type for %d in '%s'\n",
+			   typeIdx, dmp->dm_file);
+		goto exit;
+	}
+
+	symIdxType = dt_module_import_type(dmp, NULL, typeIdxType);
+	if (CTF_ERR == symIdxType) {
+		goto exit;
+	}
+
+	symName = dt_module_symbol_name(dmp, typeIdx, &nameStorage);
+
+	symIdx = ctf_add_typedef(dmp->dm_ctfp, CTF_ADD_ROOT, symName, symIdxType);
+	if (CTF_ERR == symIdx) {
+		goto exit;
+	}
+
+	if (0 != dt_idmap_add(dmp->dm_idmap, typeIdx, symIdx)) {
+		ctf_delete_type(dmp->dm_ctfp, symIdx);
+		symIdx = CTF_ERR;
+		goto exit;
+	}
+
+exit:
+	if (NULL != nameStorage) {
+		LocalFree(nameStorage);
+	}
+
+	return symIdx;
+}
+
+static ctf_id_t
+dt_module_import_pointer(dt_module_t *dmp, ULONG typeIdx)
+{
+	ctf_id_t symIdx = CTF_ERR;
+	ctf_id_t symIdxType = CTF_ERR;
+	ULONG typeIdxType;
+
+	if (0 != typeIdx) {
+		if (SymGetTypeInfo(dmp->dm_prochandle, dmp->dm_symbol_base, typeIdx,
+				   TI_GET_TYPEID, &typeIdxType) &&
+		    (0 != typeIdxType)) {
+			symIdxType = dt_module_import_type(dmp, NULL, typeIdxType);
+		}
+	}
+
+	if (CTF_ERR == symIdxType) {
+		/* Pointers work with a fallback to undefined type */
+		ctf_encoding_t enc = {0};
+		char buf[32];
+		snprintf(buf, sizeof(buf), "__notype__%lx", typeIdx);
+		symIdxType = ctf_add_integer(dmp->dm_ctfp, CTF_ADD_ROOT, buf, &enc);
+		if (CTF_ERR == symIdxType) {
+			goto exit;
+		}
+
+		ctf_update(dmp->dm_ctfp);
+	}
+
+	symIdx = ctf_type_pointer(dmp->dm_ctfp, symIdxType);
+	if (CTF_ERR == symIdx) {
+		symIdx = ctf_add_pointer(dmp->dm_ctfp, CTF_ADD_ROOT, symIdxType);
+		if (CTF_ERR == symIdx) {
+			goto exit;
+		}
+	}
+
+	if (0 != dt_idmap_add(dmp->dm_idmap, typeIdx, symIdx)) {
+		ctf_delete_type(dmp->dm_ctfp, symIdx);
+		symIdx = CTF_ERR;
+		goto exit;
+	}
+
+exit:
+	return symIdx;
+}
+
+static ctf_id_t
+dt_module_import_function(dt_module_t *dmp, ULONG typeIdx)
+{
+	ctf_id_t symIdx = CTF_ERR;
+	ctf_funcinfo_t finfo = {0};
+	ULONG typeIdxReturn;
+	TI_FINDCHILDREN_PARAMS* params = NULL;
+	ctf_id_t* paramsIdx = NULL;
+	ULONG paramCount;
+	ULONG param;
+	ULONG paramTypeIdx;
+	ULONG i;
+	ULONG baseType;
+
+	if (!SymGetTypeInfo(dmp->dm_prochandle, dmp->dm_symbol_base, typeIdx,
+			    TI_GET_TYPEID, &typeIdxReturn)) {
+		dt_dprintf("failed to get return function type for %d in '%s'\n",
+			   typeIdx, dmp->dm_file);
+		goto exit;
+	}
+
+	finfo.ctc_return = dt_module_import_type(dmp, NULL, typeIdxReturn);
+	if (CTF_ERR == finfo.ctc_return) {
+		goto exit;
+	}
+
+	if (!SymGetTypeInfo(dmp->dm_prochandle, dmp->dm_symbol_base, typeIdx,
+			    TI_GET_CHILDRENCOUNT, &paramCount)) {
+		dt_dprintf("failed to get param count for function type %d in '%s'\n",
+			   typeIdx, dmp->dm_file);
+		goto exit;
+	}
+
+	if (0 != paramCount) {
+		paramsIdx = malloc(paramCount * sizeof(ctf_id_t));
+		if (NULL == paramsIdx) {
+			goto exit;
+		}
+
+		params = malloc(sizeof(TI_FINDCHILDREN_PARAMS) + paramCount * sizeof(ULONG));
+		if (NULL == params) {
+			goto exit;
+		}
+
+		params->Count = paramCount;
+		params->Start = 0;
+
+		if (!SymGetTypeInfo(dmp->dm_prochandle, dmp->dm_symbol_base, typeIdx,
+				    TI_FINDCHILDREN, params)) {
+			dt_dprintf("failed to get params for function type %d in '%s'\n",
+				   typeIdx, dmp->dm_file);
+			goto exit;
+		}
+
+		for (i = 0; i < paramCount; i++) {
+			param = params->ChildId[i];
+			if (!SymGetTypeInfo(dmp->dm_prochandle, dmp->dm_symbol_base, param,
+					    TI_GET_TYPEID, &paramTypeIdx)) {
+				dt_dprintf("failed to get param type for function type %d in '%s'\n",
+					   typeIdx, dmp->dm_file);
+				goto exit;
+			}
+
+			if (((i + 1) == paramCount) &&
+			    SymGetTypeInfo(dmp->dm_prochandle, dmp->dm_symbol_base, paramTypeIdx,
+					   TI_GET_BASETYPE, &baseType) &&
+			    (btNoType == baseType)) {
+
+				finfo.ctc_flags |= CTF_FUNC_VARARG;
+				paramCount -= 1;
+				break;
+			}
+
+			paramsIdx[i] = dt_module_import_type(dmp, NULL, paramTypeIdx);
+			if (CTF_ERR == paramsIdx[i]) {
+				goto exit;
+			}
+		}
+	}
+
+	finfo.ctc_argc = paramCount;
+	symIdx = ctf_add_function(dmp->dm_ctfp, CTF_ADD_ROOT, &finfo, paramsIdx);
+	if (CTF_ERR == symIdx) {
+		goto exit;
+	}
+
+	if (0 != dt_idmap_add(dmp->dm_idmap, typeIdx, symIdx)) {
+		ctf_delete_type(dmp->dm_ctfp, symIdx);
+		symIdx = CTF_ERR;
+		goto exit;
+	}
+
+exit:
+
+	if (NULL != paramsIdx) {
+		free(paramsIdx);
+	}
+
+	if (NULL != params) {
+		free(params);
+	}
+
+	return symIdx;
+}
+
+static ctf_id_t
+dt_module_import_array(dt_module_t *dmp, ULONG typeIdx)
+{
+	ctf_id_t symIdx = CTF_ERR;
+	ctf_arinfo_t ainfo = {0};
+	ULONG typeIdxElement;
+	ULONG typeIdxIndex;
+	ULONG64 length;
+	ULONG64 lengthElement;
+
+	if (!SymGetTypeInfo(dmp->dm_prochandle, dmp->dm_symbol_base, typeIdx,
+			    TI_GET_TYPEID, &typeIdxElement)) {
+		dt_dprintf("failed to get array element type for %d in '%s'\n",
+			   typeIdx, dmp->dm_file);
+		goto exit;
+	}
+
+	if (!SymGetTypeInfo(dmp->dm_prochandle, dmp->dm_symbol_base, typeIdxElement,
+			    TI_GET_LENGTH, &lengthElement)) {
+		dt_dprintf("failed to get element size for %d in '%s'\n",
+			   typeIdx, dmp->dm_file);
+		goto exit;
+	}
+
+	if (!SymGetTypeInfo(dmp->dm_prochandle, dmp->dm_symbol_base, typeIdx,
+			    TI_GET_LENGTH, &length)) {
+		dt_dprintf("failed to get array size for %d in '%s'\n",
+			   typeIdx, dmp->dm_file);
+		goto exit;
+	}
+
+	if (!SymGetTypeInfo(dmp->dm_prochandle, dmp->dm_symbol_base, typeIdx,
+			    TI_GET_ARRAYINDEXTYPEID, &typeIdxIndex)) {
+		dt_dprintf("failed to get array index type for %d in '%s'\n",
+			   typeIdx, dmp->dm_file);
+		goto exit;
+	}
+
+	ainfo.ctr_contents = dt_module_import_type(dmp, NULL, typeIdxElement);
+	if (CTF_ERR == ainfo.ctr_contents) {
+		goto exit;
+	}
+
+	ainfo.ctr_index = dt_module_import_type(dmp, NULL, typeIdxIndex);
+	if (CTF_ERR == ainfo.ctr_index) {
+		goto exit;
+	}
+
+	if (0 != length && 0 != lengthElement) {
+		ainfo.ctr_nelems = length / lengthElement;
+	}
+
+	symIdx = ctf_add_array(dmp->dm_ctfp, CTF_ADD_ROOT, &ainfo);
+	if (CTF_ERR == symIdx) {
+		goto exit;
+	}
+
+	if (0 != dt_idmap_add(dmp->dm_idmap, typeIdx, symIdx)) {
+		ctf_delete_type(dmp->dm_ctfp, symIdx);
+		symIdx = CTF_ERR;
+		goto exit;
+	}
+
+exit:
+	return symIdx;
+}
+
+static ctf_id_t
+dt_module_import_enum(dt_module_t *dmp, ULONG typeIdx)
+{
+	char* symName;
+	void* nameStorage = NULL;
+	ctf_id_t symIdx = CTF_ERR;
+	TI_FINDCHILDREN_PARAMS* children = NULL;
+	ULONG childCount;
+	ULONG childIdx;
+	ULONG i;
+	VARIANT v = {0};
+	int value;
+
+	symName = dt_module_symbol_name(dmp, typeIdx, &nameStorage);
+
+	symIdx = ctf_add_enum(dmp->dm_ctfp, CTF_ADD_ROOT, symName);
+	if (CTF_ERR == symIdx) {
+		goto exit;
+	}
+
+	if (0 != dt_idmap_add(dmp->dm_idmap, typeIdx, symIdx)) {
+		ctf_delete_type(dmp->dm_ctfp, symIdx);
+		symIdx = CTF_ERR;
+		goto exit;
+	}
+
+	LocalFree(nameStorage);
+	nameStorage = NULL;
+
+	if (!SymGetTypeInfo(dmp->dm_prochandle, dmp->dm_symbol_base, typeIdx,
+			    TI_GET_CHILDRENCOUNT, &childCount) || (0 == childCount)) {
+		dt_dprintf("failed to get enum size for %d in '%s'\n",
+			   typeIdx, dmp->dm_file);
+		goto exit;
+	}
+
+	children = malloc(sizeof(TI_FINDCHILDREN_PARAMS) + childCount * sizeof(ULONG));
+	if (NULL == children) {
+		goto exit;
+	}
+
+	children->Count = childCount;
+	children->Start = 0;
+
+	if (!SymGetTypeInfo(dmp->dm_prochandle, dmp->dm_symbol_base, typeIdx,
+			    TI_FINDCHILDREN, children)) {
+		dt_dprintf("failed to get enum elements for %d in '%s'\n",
+			   typeIdx, dmp->dm_file);
+		goto exit;
+	}
+
+	for (i = 0; i < childCount; i++) {
+		childIdx = children->ChildId[i];
+		if (!SymGetTypeInfo(dmp->dm_prochandle, dmp->dm_symbol_base, childIdx,
+				    TI_GET_VALUE, &v)) {
+			dt_dprintf("failed to get enum element for %d in '%s'\n",
+				   typeIdx, dmp->dm_file);
+			goto exit;
+		}
+
+		if (NULL == (symName = dt_module_symbol_name(dmp, childIdx, &nameStorage))) {
+			goto exit;
+		}
+
+		switch (V_VT(&v)) {
+		case VT_I1: case VT_UI1:
+			value = V_I1(&v);
+			break;
+		case VT_I2: case VT_UI2:
+			value = V_I2(&v);
+			break;
+		case VT_I4: case VT_UI4:
+			value = V_I4(&v);
+			break;
+		default:
+			dt_dprintf("unsupported type %04lx of the enum for '%s'\n", V_VT(&v), symName);
+			goto exit;
+		}
+
+		if (CTF_ERR == ctf_add_enumerator(dmp->dm_ctfp, symIdx, symName, value)) {
+			goto exit;
+		}
+
+		LocalFree(nameStorage);
+		nameStorage = NULL;
+	}
+
+exit:
+	if (NULL != nameStorage) {
+		LocalFree(nameStorage);
+	}
+
+	if (NULL != children) {
+		free(children);
+	}
+
+	return symIdx;
+}
+
+static BOOL CALLBACK
+dt_module_type_enum_callback(PSYMBOL_INFO SymInfo, ULONG Size,
+			     PVOID UserContext)
+{
+	*(uint32_t*)UserContext = SymInfo->Index;
+	return FALSE;
+}
+
+extern void ctf_set_no_type_errno(ctf_file_t *);
+
+static ctf_id_t
+dt_module_import_type(dt_module_t *dmp, const char *name, ULONG typeIdx)
+{
+	ULONG symTag;
+	ctf_id_t symIdx = CTF_ERR;
+
+	if (NULL == dmp->dm_file) {
+		goto exit;
+	}
+
+	if (!dt_module_syminit(dmp)) {
+		goto exit;
+	}
+
+	if (NULL != name) {
+		typeIdx = 0;
+		if (!SymEnumTypesByName(dmp->dm_prochandle, dmp->dm_symbol_base,
+					name, dt_module_type_enum_callback, &typeIdx) ||
+		    (0 == typeIdx)) {
+			dt_dprintf("failed to find type '%s' in '%s'\n",
+				   name, dmp->dm_file);
+			goto exit;
+		}
+	}
+
+	symIdx = dt_idmap_p2c(dmp->dm_idmap, typeIdx);
+	if (CTF_ERR != symIdx) {
+		goto exit;
+	}
+
+	if (0 == typeIdx) {
+		/*
+		 * Create and use a dummy pointer type for index '0' to provide
+		 * limited support for type-stripped PDBs
+		 */
+
+		symIdx = dt_module_import_pointer(dmp, 0);
+		ctf_update(dmp->dm_ctfp);
+		goto exit;
+	}
+
+	if (!SymGetTypeInfo(dmp->dm_prochandle, dmp->dm_symbol_base, typeIdx,
+			    TI_GET_SYMTAG, &symTag)) {
+
+		dt_dprintf("failed to get type tag  %d' in '%s'\n",
+			   typeIdx, dmp->dm_file);
+		goto exit;
+	}
+
+	switch (symTag) {
+	case SymTagBaseType:
+		symIdx = dt_module_import_basetype(dmp, typeIdx);
+		break;
+
+	case SymTagUDT:
+		symIdx = dt_module_import_udt(dmp, typeIdx);
+		break;
+
+	case SymTagTypedef:
+		symIdx = dt_module_import_typedef(dmp, typeIdx);
+		break;
+
+	case SymTagPointerType:
+		symIdx = dt_module_import_pointer(dmp, typeIdx);
+		break;
+
+	case SymTagFunctionType:
+		symIdx = dt_module_import_function(dmp, typeIdx);
+		break;
+
+	case SymTagArrayType:
+		symIdx = dt_module_import_array(dmp, typeIdx);
+		break;
+
+	case SymTagEnum:
+		symIdx = dt_module_import_enum(dmp, typeIdx);
+		break;
+
+	default:
+		dt_dprintf("unsupported tag %04lx\n", symTag);
+		goto exit;
+	}
+
+	ctf_update(dmp->dm_ctfp);
+
+exit:
+	if (CTF_ERR == symIdx && NULL != dmp->dm_ctfp) {
+		ctf_set_no_type_errno(dmp->dm_ctfp);
+	}
+	return symIdx;
+}
+
+static BOOL CALLBACK
+dt_module_enumtypes_proc(PSYMBOL_INFO SymInfo, ULONG  SymbolSize, PVOID UserContext)
+{
+	dt_module_t *dmp = (dt_module_t *)UserContext;
+	dt_module_import_type(dmp, NULL, SymInfo->TypeIndex);
+	return TRUE;
+}
+
+static int
+dt_module_import_types(dt_module_t *dmp)
+{
+	SymEnumTypes(dmp->dm_prochandle, dmp->dm_symbol_base,
+		     dt_module_enumtypes_proc, dmp);
+	return 0;
+}
+
+ctf_id_t
+dt_module_function_typeid(dt_module_t *dmp, const char *name)
+{
+	GElf_Sym sym;
+	uint_t symid;
+	if (NULL == dt_module_symname(dmp, name, &sym, &symid))
+		return CTF_ERR;
+
+	ULONG SymTag;
+	if (!SymGetTypeInfo(dmp->dm_prochandle, dmp->dm_symbol_base,
+			    sym.st_type_idx, TI_GET_SYMTAG, &SymTag))
+		return CTF_ERR;
+
+	if (SymTagFunctionType != SymTag)
+		return CTF_ERR;
+
+	return dt_module_import_type(dmp, NULL, sym.st_type_idx);
+}
+
+#else
 
 static const char *dt_module_strtab; /* active strtab for qsort callbacks */
 
@@ -178,7 +1291,7 @@ dt_module_syminit64(dt_module_t *dmp)
 }
 
 /*
- * Sort comparison function for 32-bit symbol address-to-name lookups.  We sort
+ * Sort comparison function for 32-bit symbol address-to-name lookups.	We sort
  * symbols by value.  If values are equal, we prefer the symbol that is
  * non-zero sized, typed, not weak, or lexically first, in that order.
  */
@@ -207,7 +1320,7 @@ dt_module_symcomp32(const void *lp, const void *rp)
 }
 
 /*
- * Sort comparison function for 64-bit symbol address-to-name lookups.  We sort
+ * Sort comparison function for 64-bit symbol address-to-name lookups.	We sort
  * symbols by value.  If values are equal, we prefer the symbol that is
  * non-zero sized, typed, not weak, or lexically first, in that order.
  */
@@ -465,12 +1578,43 @@ static const dt_modops_t dt_modops_64 = {
 	dt_module_symaddr64
 };
 
+#endif
+
+#ifdef _WIN32
 dt_module_t *
-dt_module_create(dtrace_hdl_t *dtp, const char *name)
+dt_module_lookup_by_name_ext(dtrace_hdl_t *dtp, const char *name)
 {
-	long pid;
-	char *eptr;
-	dt_ident_t *idp;
+	size_t match_len;
+	uint_t n, i;
+	dt_module_t *dmp;
+
+	dmp = dt_list_next(&dtp->dt_modlist);
+	n = dtp->dt_nmods;
+
+	if (strrchr(name, '.') != NULL) {
+		for (; n > 0; n--, dmp = dt_list_next(dmp)) {
+			if (_stricmp(dmp->dm_name, name) == 0)
+				return (dmp);
+		}
+
+	} else {
+		match_len = strlen(name);
+		for (; n > 0; n--, dmp = dt_list_next(dmp)) {
+			if ((_strnicmp(dmp->dm_name, name, match_len) == 0) &&
+			    (('\0' == dmp->dm_name[match_len]) ||
+			     ((dmp->dm_name + match_len) == strrchr(dmp->dm_name, '.')))) {
+				return (dmp);
+			}
+		}
+	}
+
+	return NULL;
+}
+#endif
+
+dt_module_t *
+dt_module_lookup_by_name(dtrace_hdl_t *dtp, const char *name)
+{
 	uint_t h = dt_strtab_hash(name, NULL) % dtp->dt_modbuckets;
 	dt_module_t *dmp;
 
@@ -479,9 +1623,30 @@ dt_module_create(dtrace_hdl_t *dtp, const char *name)
 			return (dmp);
 	}
 
+#ifdef _WIN32
+	if ((dmp = dt_module_lookup_by_name_ext(dtp, name)) != NULL)
+		return (dmp);
+#endif
+
+	return (NULL);
+}
+
+dt_module_t *
+dt_module_create(dtrace_hdl_t *dtp, const char *name)
+{
+	long pid;
+	char *eptr;
+	dt_ident_t *idp;
+	uint_t h;
+	dt_module_t *dmp;
+
+	if ((dmp = dt_module_lookup_by_name(dtp, name)) != NULL)
+		return (dmp);
+
 	if ((dmp = malloc(sizeof (dt_module_t))) == NULL)
 		return (NULL); /* caller must handle allocation failure */
 
+	h = dt_strtab_hash(name, NULL) % dtp->dt_modbuckets;
 	bzero(dmp, sizeof (dt_module_t));
 	(void) strlcpy(dmp->dm_name, name, sizeof (dmp->dm_name));
 	dt_list_append(&dtp->dt_modlist, dmp);
@@ -489,10 +1654,12 @@ dt_module_create(dtrace_hdl_t *dtp, const char *name)
 	dtp->dt_mods[h] = dmp;
 	dtp->dt_nmods++;
 
+#ifndef _WIN32
 	if (dtp->dt_conf.dtc_ctfmodel == CTF_MODEL_LP64)
 		dmp->dm_ops = &dt_modops_64;
 	else
 		dmp->dm_ops = &dt_modops_32;
+#endif
 
 	/*
 	 * Modules for userland processes are special. They always refer to a
@@ -523,26 +1690,14 @@ dt_module_create(dtrace_hdl_t *dtp, const char *name)
 	return (dmp);
 }
 
-dt_module_t *
-dt_module_lookup_by_name(dtrace_hdl_t *dtp, const char *name)
-{
-	uint_t h = dt_strtab_hash(name, NULL) % dtp->dt_modbuckets;
-	dt_module_t *dmp;
-
-	for (dmp = dtp->dt_mods[h]; dmp != NULL; dmp = dmp->dm_next) {
-		if (strcmp(dmp->dm_name, name) == 0)
-			return (dmp);
-	}
-
-	return (NULL);
-}
-
 /*ARGSUSED*/
 dt_module_t *
 dt_module_lookup_by_ctf(dtrace_hdl_t *dtp, ctf_file_t *ctfp)
 {
 	return (ctfp ? ctf_getspecific(ctfp) : NULL);
 }
+
+#ifndef _WIN32
 
 #ifdef __FreeBSD__
 dt_kmodule_t *
@@ -679,6 +1834,7 @@ dt_module_load_proc_build(void *arg, const prmap_t *prmap, const char *obj)
 
 /*
  * We've been asked to load data that belongs to another process. As such we're
+
  * going to pgrab it at this instant, load everything that we might ever care
  * about, and then drive on. The reason for this is that the process that we're
  * interested in might be changing. As long as we have grabbed it, then this
@@ -758,6 +1914,89 @@ dt_module_load_proc(dtrace_hdl_t *dtp, dt_module_t *dmp)
 	return (0);
 }
 
+#else
+
+typedef struct dt_module_cb_arg {
+	dtrace_hdl_t *dpa_dtp;
+	dt_module_t *dpa_dmp;
+	uint_t dpa_allocated;
+} dt_module_cb_arg_t;
+
+static BOOL CALLBACK dt_module_load_proc_EnumModulesCallback(PCSTR ModuleName, DWORD64 BaseOfDll, PVOID UserContext)
+{
+	dt_module_cb_arg_t* ctx = (dt_module_cb_arg_t*)UserContext;
+	dt_module_t *dmp;
+	dt_module_t **newp;
+	const uint_t incr = 10;
+	IMAGEHLP_MODULE64 ihm = {0};
+
+	ihm.SizeOfStruct = sizeof(ihm);
+	if (!SymGetModuleInfo64(ctx->dpa_dmp->dm_prochandle, BaseOfDll, &ihm)) {
+		return TRUE;
+	}
+
+	if (ctx->dpa_allocated == ctx->dpa_dmp->dm_npidmods) {
+		newp = realloc(ctx->dpa_dmp->dm_pidmods,
+			       (sizeof(dt_module_t *) *
+				(ctx->dpa_allocated + incr)));
+		if (NULL == newp) {
+			return TRUE;
+		}
+		ctx->dpa_dmp->dm_pidmods = newp;
+                ctx->dpa_allocated += incr;
+	}
+
+	if ((dmp = malloc(sizeof (dt_module_t))) == NULL) {
+		return TRUE;
+	}
+
+	bzero(dmp, sizeof (dt_module_t));
+	(void) strlcpy(dmp->dm_name, ihm.ModuleName, sizeof (dmp->dm_name));
+	(void) strlcpy(dmp->dm_file, ihm.ImageName, sizeof (dmp->dm_file));
+	dmp->dm_prochandle = ctx->dpa_dmp->dm_prochandle;
+	dmp->dm_image_base = BaseOfDll;
+	dmp->dm_symbol_base = dmp->dm_image_base;
+	dmp->dm_flags |= DT_DM_LOADED;
+
+	ctx->dpa_dmp->dm_pidmods[ctx->dpa_dmp->dm_npidmods++] = dmp;
+	return TRUE;
+}
+
+static int
+dt_module_load_proc(dtrace_hdl_t *dtp, dt_module_t *dmp)
+{
+	dmp->dm_phdl = dt_proc_grab(dtp, dmp->dm_pid, 0, PGRAB_RDONLY | PGRAB_FORCE);
+	if (dmp->dm_phdl == NULL) {
+		dt_dprintf("failed to grab pid: %d\n", (int)dmp->dm_pid);
+		return (dt_set_errno(dtp, EDT_CANTLOAD));
+	}
+
+	dmp->dm_prochandle = proc_gethandle(dmp->dm_phdl);
+
+	dt_module_cb_arg_t ctx;
+	ctx.dpa_dtp = dtp;
+	ctx.dpa_dmp = dmp;
+	ctx.dpa_allocated = 0;
+
+	if (!SymEnumerateModules64(dmp->dm_prochandle,
+				   dt_module_load_proc_EnumModulesCallback,
+				   &ctx)) {
+		dt_dprintf("failed to list modules for pid: %d\n", (int)dmp->dm_pid);
+		dt_proc_release(dtp, dmp->dm_phdl);
+		dmp->dm_phdl = NULL;
+		dmp->dm_prochandle = NULL;
+		return (dt_set_errno(dtp, EDT_CANTLOAD));
+	}
+
+	dt_dprintf("loaded %d ctf modules for pid %d\n", dmp->dm_npidmods,
+	    (int)dmp->dm_pid);
+
+	dmp->dm_flags |= DT_DM_LOADED;
+	return (0);
+}
+
+#endif
+
 int
 dt_module_load(dtrace_hdl_t *dtp, dt_module_t *dmp)
 {
@@ -766,6 +2005,49 @@ dt_module_load(dtrace_hdl_t *dtp, dt_module_t *dmp)
 
 	if (dmp->dm_pid != 0)
 		return (dt_module_load_proc(dtp, dmp));
+
+#ifdef _WIN32
+	dmp->dm_prochandle = GetCurrentProcess();
+
+	if (dmp->dm_flags & DT_DM_KERNEL) {
+		dmp->dm_flags |= DT_DM_LOADED;
+		return 0;
+	}
+
+	if ('\0' == dmp->dm_file[0]) {
+		HMODULE Mod = GetModuleHandleA(dmp->dm_name);
+		if (NULL != Mod) {
+			dmp->dm_image_base = (GElf_Addr)(ULONG_PTR)Mod;
+			GetModuleFileNameA(Mod, dmp->dm_file, MAXPATHLEN);
+		}
+	}
+
+	if ('\0' == dmp->dm_file[0]) {
+		PVOID OldRedirectionDisabled;
+		BOOL RedirectionDisabled =
+		    Wow64DisableWow64FsRedirection(&OldRedirectionDisabled);
+		DWORD len = SearchPathA(NULL, dmp->dm_name, NULL,
+					MAXPATHLEN, dmp->dm_file, NULL);
+		if (RedirectionDisabled) {
+			Wow64RevertWow64FsRedirection(OldRedirectionDisabled);
+		}
+
+		if ((0 == len) || (len >= MAXPATHLEN)) {
+			dmp->dm_file[0] = '\0';
+		}
+	}
+
+	if ('\0' == dmp->dm_file[0]) {
+		strcpy(dmp->dm_file, dmp->dm_name);
+	}
+
+	if (!dt_module_syminit(dmp)) {
+		return (dt_set_errno(dtp, EDT_NOMOD));
+	}
+
+	dmp->dm_flags |= DT_DM_LOADED;
+	return 0;
+#else
 
 	dmp->dm_ctdata.cts_name = ".SUNW_ctf";
 	dmp->dm_ctdata.cts_type = SHT_PROGBITS;
@@ -847,13 +2129,19 @@ dt_module_load(dtrace_hdl_t *dtp, dt_module_t *dmp)
 
 	dmp->dm_flags |= DT_DM_LOADED;
 	return (0);
+#endif
 }
 
 int
 dt_module_hasctf(dtrace_hdl_t *dtp, dt_module_t *dmp)
 {
+#ifdef _WIN32
+	if (dmp->dm_pid != 0 && dmp->dm_npidmods > 0)
+		return (1);
+#else
 	if (dmp->dm_pid != 0 && dmp->dm_nctflibs > 0)
 		return (1);
+#endif
 	return (dt_module_getctf(dtp, dmp) != NULL);
 }
 
@@ -867,6 +2155,26 @@ dt_module_getctf(dtrace_hdl_t *dtp, dt_module_t *dmp)
 
 	if (dmp->dm_ctfp != NULL || dt_module_load(dtp, dmp) != 0)
 		return (dmp->dm_ctfp);
+
+#ifdef _WIN32
+
+	model = CTF_MODEL_NATIVE;
+
+	if (dtp->dt_conf.dtc_ctfmodel != model) {
+		(void) dt_set_errno(dtp, EDT_DATAMODEL);
+		return (NULL);
+	}
+
+	dmp->dm_ctfp = ctf_create(&dtp->dt_ctferr);
+	if (dmp->dm_ctfp == NULL) {
+		(void) dt_set_errno(dtp, EDT_CTF);
+		return (NULL);
+	}
+
+	/* Too expensice - types will be imported as needed */
+	/*dt_module_import_types(dmp);*/
+
+#else
 
 	if (dmp->dm_ops == &dt_modops_64)
 		model = CTF_MODEL_LP64;
@@ -897,6 +2205,8 @@ dt_module_getctf(dtrace_hdl_t *dtp, dt_module_t *dmp)
 		return (NULL);
 	}
 
+#endif
+
 	(void) ctf_setmodel(dmp->dm_ctfp, model);
 	ctf_setspecific(dmp->dm_ctfp, dmp);
 
@@ -923,6 +2233,7 @@ dt_module_getctf(dtrace_hdl_t *dtp, dt_module_t *dmp)
 err:
 	ctf_close(dmp->dm_ctfp);
 	dmp->dm_ctfp = NULL;
+
 	return (NULL);
 }
 
@@ -935,7 +2246,7 @@ dt_module_unload(dtrace_hdl_t *dtp, dt_module_t *dmp)
 	ctf_close(dmp->dm_ctfp);
 	dmp->dm_ctfp = NULL;
 
-#ifndef illumos
+#if !defined(illumos) && !defined(_WIN32)
 	if (dmp->dm_ctdata.cts_data != NULL) {
 		free(dmp->dm_ctdata.cts_data);
 	}
@@ -947,6 +2258,19 @@ dt_module_unload(dtrace_hdl_t *dtp, dt_module_t *dmp)
 	}
 #endif
 
+#ifdef _WIN32
+	if (dmp->dm_pidmods != NULL) {
+		for (i = 0; i < dmp->dm_npidmods; i++) {
+			if (dmp != dmp->dm_pidmods[i]) {
+				dt_module_unload(dtp, dmp->dm_pidmods[i]);
+				free(dmp->dm_pidmods[i]);
+			}
+		}
+		free(dmp->dm_pidmods);
+		dmp->dm_pidmods = NULL;
+		dmp->dm_npidmods = 0;
+	}
+#else
 	if (dmp->dm_libctfp != NULL) {
 		for (i = 0; i < dmp->dm_nctflibs; i++) {
 			ctf_close(dmp->dm_libctfp[i]);
@@ -957,7 +2281,9 @@ dt_module_unload(dtrace_hdl_t *dtp, dt_module_t *dmp)
 		dmp->dm_libctfp = NULL;
 		dmp->dm_nctflibs = 0;
 	}
+#endif
 
+#ifndef _WIN32
 	bzero(&dmp->dm_ctdata, sizeof (ctf_sect_t));
 	bzero(&dmp->dm_symtab, sizeof (ctf_sect_t));
 	bzero(&dmp->dm_strtab, sizeof (ctf_sect_t));
@@ -987,21 +2313,48 @@ dt_module_unload(dtrace_hdl_t *dtp, dt_module_t *dmp)
 	dmp->dm_nsymelems = 0;
 	dmp->dm_asrsv = 0;
 	dmp->dm_aslen = 0;
+#endif
 
+#ifdef _WIN32
+	dmp->dm_image_base = 0;
+	dmp->dm_image_size = 0;
+#else
 	dmp->dm_text_va = 0;
 	dmp->dm_text_size = 0;
 	dmp->dm_data_va = 0;
 	dmp->dm_data_size = 0;
 	dmp->dm_bss_va = 0;
 	dmp->dm_bss_size = 0;
+#endif
 
 	if (dmp->dm_extern != NULL) {
 		dt_idhash_destroy(dmp->dm_extern);
 		dmp->dm_extern = NULL;
 	}
 
+#ifdef _WIN32
+	if ((0 != dmp->dm_symbol_base) && (-1 != dmp->dm_symbol_base))
+		SymUnloadModule64(dmp->dm_prochandle, dmp->dm_symbol_base);
+	dmp->dm_symbol_base = 0;
+
+	if (NULL != dmp->dm_strmap)
+		dt_strmap_destroy(dmp->dm_strmap);
+	dmp->dm_strmap = NULL;
+
+	if (NULL != dmp->dm_idmap)
+		dt_idmap_destroy(dmp->dm_idmap);
+	dmp->dm_idmap = NULL;
+
+	dmp->dm_prochandle = NULL;
+	if (NULL != dmp->dm_phdl) {
+		if (dtp->dt_procs != NULL)
+			dt_proc_release(dtp, dmp->dm_phdl);
+		dmp->dm_phdl = NULL;
+	}
+#else
 	(void) elf_end(dmp->dm_elf);
 	dmp->dm_elf = NULL;
+#endif
 
 	dmp->dm_pid = 0;
 
@@ -1034,6 +2387,7 @@ dt_module_destroy(dtrace_hdl_t *dtp, dt_module_t *dmp)
 	free(dmp);
 }
 
+
 /*
  * Insert a new external symbol reference into the specified module.  The new
  * symbol will be marked as undefined and is assigned a symbol index beyond
@@ -1047,9 +2401,16 @@ dt_module_extern(dtrace_hdl_t *dtp, dt_module_t *dmp,
 	dtrace_syminfo_t *sip;
 	dt_ident_t *idp;
 	uint_t id;
+	uint_t idmin;
+
+#ifdef _WIN32
+	idmin = 0x10000;
+#else
+	idmin = dmp->dm_nsymelems;
+#endif
 
 	if (dmp->dm_extern == NULL && (dmp->dm_extern = dt_idhash_create(
-	    "extern", NULL, dmp->dm_nsymelems, UINT_MAX)) == NULL) {
+	    "extern", NULL, idmin, UINT_MAX)) == NULL) {
 		(void) dt_set_errno(dtp, EDT_NOMEM);
 		return (NULL);
 	}
@@ -1087,10 +2448,18 @@ dt_module_extern(dtrace_hdl_t *dtp, dt_module_t *dmp,
 const char *
 dt_module_modelname(dt_module_t *dmp)
 {
+#ifdef _WIN32
+#ifdef _WIN64
+	return ("64-bit");
+#else
+	return ("32-bit");
+#endif
+#else
 	if (dmp->dm_ops == &dt_modops_64)
 		return ("64-bit");
 	else
 		return ("32-bit");
+#endif
 }
 
 /* ARGSUSED */
@@ -1099,13 +2468,52 @@ dt_module_getlibid(dtrace_hdl_t *dtp, dt_module_t *dmp, const ctf_file_t *fp)
 {
 	int i;
 
+#ifdef _WIN32
+	for (i = 0; i < dmp->dm_npidmods; i++) {
+		if (dmp->dm_pidmods[i]->dm_ctfp == fp)
+			return (i);
+	}
+#else
 	for (i = 0; i < dmp->dm_nctflibs; i++) {
 		if (dmp->dm_libctfp[i] == fp)
 			return (i);
 	}
+#endif
 
 	return (-1);
 }
+
+#ifdef _WIN32
+dt_module_t *
+dt_module_getctfmod(dtrace_hdl_t *dtp, dt_module_t *dmp, const char *name)
+{
+	int i;
+	size_t match_len;
+	dt_module_t *dmpi;
+
+	if (strrchr(name, '.') != NULL) {
+		for (i = 0; i < dmp->dm_npidmods; i++) {
+			dmpi = dmp->dm_pidmods[i];
+			if (_stricmp(dmpi->dm_name, name) == 0) {
+				return (dmpi);
+			}
+		}
+	} else {
+		match_len = strlen(name);
+		for (i = 0; i < dmp->dm_npidmods; i++) {
+			dmpi = dmp->dm_pidmods[i];
+			if ((_strnicmp(dmpi->dm_name, name, match_len) == 0) &&
+			    (('\0' == dmpi->dm_name[match_len]) ||
+			     ((dmpi->dm_name + match_len) == strrchr(dmpi->dm_name, '.')))) {
+				return (dmpi);
+			}
+		}
+	}
+
+	return (NULL);
+}
+
+#else
 
 /* ARGSUSED */
 ctf_file_t *
@@ -1121,20 +2529,134 @@ dt_module_getctflib(dtrace_hdl_t *dtp, dt_module_t *dmp, const char *name)
 	return (NULL);
 }
 
+#endif
+
 /*
  * Update our module cache by adding an entry for the specified module 'name'.
  * We create the dt_module_t and populate it using /system/object/<name>/.
  *
- * On FreeBSD, the module name is passed as the full module file name, 
+ * On FreeBSD, the module name is passed as the full module file name,
  * including the path.
  */
 static void
 #ifdef illumos
 dt_module_update(dtrace_hdl_t *dtp, const char *name)
+#elif defined(_WIN32)
+dt_module_update(dtrace_hdl_t *dtp, void* base_address)
 #else
 dt_module_update(dtrace_hdl_t *dtp, struct kld_file_stat *k_stat)
 #endif
 {
+#ifdef _WIN32
+
+	dt_module_t *dmp;
+	char driver_path[MAXPATHLEN];
+	char* name;
+	PIMAGE_NT_HEADERS headers;
+	HANDLE fh = INVALID_HANDLE_VALUE;
+	HANDLE section = NULL;
+	PVOID view = NULL;
+	BOOL RedirectionDisabled;
+	PVOID OldRedirectionDisabled;
+
+	if (!GetDeviceDriverFileNameA(base_address, driver_path, sizeof(driver_path)))
+		goto exit;
+
+	if (driver_path[0] == '\\' && driver_path[1] == '?' &&
+	    driver_path[2] == '?' && driver_path[3] == '\\') {
+
+		driver_path[1] = '\\';
+
+	} else {
+		const char SystemRootPrefix[] = "\\SystemRoot\\";
+		int len;
+		char expanded[MAXPATHLEN];
+
+		if (!_strnicmp(driver_path, SystemRootPrefix,
+			       sizeof(SystemRootPrefix) - 1)) {
+
+			len = GetEnvironmentVariableA("SYSTEMROOT", expanded,
+						      sizeof(expanded));
+
+			if ((len > 0) &&
+			    ((sizeof(driver_path) - len) >
+			     ((strlen(driver_path) + 1) - (sizeof(SystemRootPrefix) - 3)))) {
+
+				strcat(expanded, driver_path + (sizeof(SystemRootPrefix) - 2));
+				strcpy(driver_path, expanded);
+			}
+		}
+	}
+
+	name = strrchr(driver_path, '\\');
+	if (NULL == name)
+		name = driver_path;
+	else
+		name += 1;
+
+	if (!strcmp(name, "ntoskrnl.exe")) {
+		name = "nt";
+	}
+
+	RedirectionDisabled = Wow64DisableWow64FsRedirection(&OldRedirectionDisabled);
+	fh = CreateFileA(driver_path, GENERIC_READ,
+			 (FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE),
+			 NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (RedirectionDisabled) {
+		Wow64RevertWow64FsRedirection(OldRedirectionDisabled);
+	}
+
+	if (INVALID_HANDLE_VALUE == fh) {
+		dt_dprintf("failed to open %s: %08lx\n", driver_path, GetLastError());
+		goto exit;
+	}
+
+	section = CreateFileMappingW(fh, NULL, PAGE_READONLY, 0, 0, NULL);
+	if (NULL == section) {
+		dt_dprintf("failed to open %s: %08lx\n", driver_path, GetLastError());
+		goto exit;
+	}
+
+	view = MapViewOfFile(section, FILE_MAP_READ, 0, 0, 0);
+	if (NULL == view) {
+		dt_dprintf("failed to open %s: %08lx\n", driver_path, GetLastError());
+		goto exit;
+	}
+
+	headers = ImageNtHeader(view);
+	if (NULL == headers) {
+		dt_dprintf("failed to open %s: %08lx\n", driver_path, GetLastError());
+		goto exit;
+	}
+
+	dmp = dt_module_create(dtp, name);
+	if (NULL == dmp) {
+		dt_dprintf("failed to open %s: %s\n", driver_path, strerror(errno));
+		goto exit;
+	}
+
+	strcpy(dmp->dm_file, driver_path);
+	dmp->dm_flags |= DT_DM_KERNEL | DT_DM_PRIMARY | DT_DM_LOADED;
+	dmp->dm_image_base = (GElf_Addr)base_address;
+	dmp->dm_image_size = headers->OptionalHeader.SizeOfImage;
+	dmp->dm_prochandle = GetCurrentProcess();
+
+exit:
+	if (INVALID_HANDLE_VALUE != fh) {
+		CloseHandle(fh);
+	}
+
+	if (NULL != section) {
+		CloseHandle(section);
+	}
+
+	if (NULL != view) {
+		UnmapViewOfFile(view);
+	}
+
+	return;
+
+#else
 	char fname[MAXPATHLEN];
 	struct stat64 st;
 	int fd, err, bits;
@@ -1319,6 +2841,7 @@ dt_module_update(dtrace_hdl_t *dtp, struct kld_file_stat *k_stat)
 
 	dt_dprintf("opened %d-bit module %s (%s) [%d]\n",
 	    bits, dmp->dm_name, dmp->dm_file, dmp->dm_modid);
+#endif
 }
 
 /*
@@ -1329,9 +2852,13 @@ void
 dtrace_update(dtrace_hdl_t *dtp)
 {
 	dt_module_t *dmp;
+#ifdef illumos
 	DIR *dirp;
-#if defined(__FreeBSD__)
+#elif defined(__FreeBSD__)
 	int fileid;
+#elif defined(_WIN32)
+	PVOID* driver_bases;
+	DWORD driver_count, cb, i;
 #endif
 
 	for (dmp = dt_list_next(&dtp->dt_modlist);
@@ -1354,7 +2881,9 @@ dtrace_update(dtrace_hdl_t *dtp)
 
 		(void) closedir(dirp);
 	}
+
 #elif defined(__FreeBSD__)
+
 	/*
 	 * Use FreeBSD's kernel loader interface to discover what kernel
 	 * modules are loaded and create a libdtrace module for each one.
@@ -1365,6 +2894,37 @@ dtrace_update(dtrace_hdl_t *dtp)
 		if (kldstat(fileid, &k_stat) == 0)
 			dt_module_update(dtp, &k_stat);
 	}
+
+#elif defined(_WIN32)
+
+	/*
+	 * Use Win32 psapi interface to enumerate all kernel modules
+	 * and create a libdtrace module for each one.
+	 */
+	driver_bases = NULL;
+	driver_count = 0;
+	cb = 0;
+	while (EnumDeviceDrivers(driver_bases, driver_count * sizeof(PVOID), &cb)) {
+		if (cb <= driver_count * sizeof(PVOID)) {
+			break;
+		}
+
+		if (driver_bases)
+			free(driver_bases);
+		driver_bases = malloc(cb);
+		if (!driver_bases)
+			break;
+		driver_count = cb / sizeof(PVOID);
+		cb = 0;
+	}
+
+	if (driver_bases) {
+		for (i = 0; i < cb / sizeof(void*); i++) {
+			dt_module_update(dtp, driver_bases[i]);
+		}
+		free(driver_bases);
+	}
+
 #endif
 
 	/*
@@ -1372,6 +2932,10 @@ dtrace_update(dtrace_hdl_t *dtp)
 	 * This code collaborates with dt_lex.l on the use of di_id.  We will
 	 * need to implement something fancier if we need to support non-ints.
 	 */
+#ifdef _WIN32
+	dt_idhash_lookup(dtp->dt_macros, "pid")->di_id = GetCurrentProcessId();
+	dtp->dt_exec = dt_module_lookup_by_name(dtp, "nt");
+#else
 	dt_idhash_lookup(dtp->dt_macros, "egid")->di_id = getegid();
 	dt_idhash_lookup(dtp->dt_macros, "euid")->di_id = geteuid();
 	dt_idhash_lookup(dtp->dt_macros, "gid")->di_id = getgid();
@@ -1397,7 +2961,7 @@ dtrace_update(dtrace_hdl_t *dtp)
 	dtp->dt_rtld = dt_module_lookup_by_name(dtp, "krtld");
 	if (dtp->dt_rtld == NULL)
 		dtp->dt_rtld = dt_module_lookup_by_name(dtp, "unix");
-
+#endif
 	/*
 	 * If this is the first time we are initializing the module list,
 	 * remove the module for genunix from the module list and then move it
@@ -1426,6 +2990,7 @@ dt_module_from_object(dtrace_hdl_t *dtp, const char *object)
 		dmp = dtp->dt_rtld;
 		break;
 	case (uintptr_t)DTRACE_OBJ_CDEFS:
+
 		dmp = dtp->dt_cdefs;
 		break;
 	case (uintptr_t)DTRACE_OBJ_DDEFS:
@@ -1488,19 +3053,29 @@ dtrace_lookup_by_name(dtrace_hdl_t *dtp, const char *object, const char *name,
 		if (dt_module_load(dtp, dmp) == -1)
 			continue; /* failed to load symbol table */
 
+#ifdef _WIN32
+		if (dt_module_symname(dmp, name, symp, &id) != NULL) {
+#else
 		if (dmp->dm_ops->do_symname(dmp, name, symp, &id) != NULL) {
+#endif
 			if (sip != NULL) {
 				sip->dts_object = dmp->dm_name;
+#ifdef _WIN32
+				sip->dts_name = (const char *)symp->st_namep;
+#else
 				sip->dts_name = (const char *)
 				    dmp->dm_strtab.cts_data + symp->st_name;
+#endif
 				sip->dts_id = id;
 			}
 			return (0);
 		}
-
 		if (dmp->dm_extern != NULL &&
 		    (idp = dt_idhash_lookup(dmp->dm_extern, name)) != NULL) {
 			if (symp != &sym) {
+#ifdef _WIN32
+				// TODO:
+#else
 				symp->st_name = (uintptr_t)idp->di_name;
 				symp->st_info =
 				    GELF_ST_INFO(STB_GLOBAL, STT_NOTYPE);
@@ -1509,6 +3084,7 @@ dtrace_lookup_by_name(dtrace_hdl_t *dtp, const char *object, const char *name,
 				symp->st_value = 0;
 				symp->st_size =
 				    ctf_type_size(idp->di_ctfp, idp->di_type);
+#endif
 			}
 
 			if (sip != NULL) {
@@ -1541,9 +3117,13 @@ dtrace_lookup_by_addr(dtrace_hdl_t *dtp, GElf_Addr addr,
 
 	for (dmp = dt_list_next(&dtp->dt_modlist); dmp != NULL;
 	    dmp = dt_list_next(dmp)) {
+#ifdef _WIN32
+		if (addr - dmp->dm_image_base < dmp->dm_image_size)
+#else
 		if (addr - dmp->dm_text_va < dmp->dm_text_size ||
 		    addr - dmp->dm_data_va < dmp->dm_data_size ||
 		    addr - dmp->dm_bss_va < dmp->dm_bss_size)
+#endif
 			break;
 	}
 
@@ -1553,8 +3133,14 @@ dtrace_lookup_by_addr(dtrace_hdl_t *dtp, GElf_Addr addr,
 	if (dt_module_load(dtp, dmp) == -1)
 		return (-1); /* dt_errno is set for us */
 
+
+	id = 0;
 	if (symp != NULL) {
+#ifdef _WIN32
+		if (dt_module_symaddr(dmp, addr, symp, &id) == NULL)
+#else
 		if (dmp->dm_ops->do_symaddr(dmp, addr, symp, &id) == NULL)
+#endif
 			return (dt_set_errno(dtp, EDT_NOSYMADDR));
 	}
 
@@ -1562,8 +3148,12 @@ dtrace_lookup_by_addr(dtrace_hdl_t *dtp, GElf_Addr addr,
 		sip->dts_object = dmp->dm_name;
 
 		if (symp != NULL) {
+#ifdef _WIN32
+			sip->dts_name = symp->st_namep;
+#else
 			sip->dts_name = (const char *)
 			    dmp->dm_strtab.cts_data + symp->st_name;
+#endif
 			sip->dts_id = id;
 		} else {
 			sip->dts_name = NULL;
@@ -1637,6 +3227,11 @@ dtrace_lookup_by_type(dtrace_hdl_t *dtp, const char *object, const char *name,
 		 */
 		if (dmp->dm_pid == 0) {
 			id = ctf_lookup_by_name(dmp->dm_ctfp, name);
+#ifdef _WIN32
+			if (CTF_ERR == id && justone) {
+				id = dt_module_import_type(dmp, name, 0);
+			}
+#endif
 			fp = dmp->dm_ctfp;
 		} else {
 			if ((p = strchr(name, '`')) != NULL) {
@@ -1647,18 +3242,45 @@ dtrace_lookup_by_type(dtrace_hdl_t *dtp, const char *object, const char *name,
 				if ((q = strchr(p + 1, '`')) != NULL)
 					p = q;
 				*p = '\0';
+#ifdef _WIN32
+				id = CTF_ERR;
+				dt_module_t *dmpi = dt_module_getctfmod(dtp, dmp, buf);
+				if (NULL != dmpi) {
+					fp = dt_module_getctf(dtp, dmpi);
+					if (NULL != fp) {
+						p += 1;
+						id = ctf_lookup_by_name(fp, p);
+						if (justone && (id == CTF_ERR))
+							id = dt_module_import_type(dmpi, p, 0);
+					}
+				}
+#else
 				fp = dt_module_getctflib(dtp, dmp, buf);
 				if (fp == NULL || (id = ctf_lookup_by_name(fp,
 				    p + 1)) == CTF_ERR)
 					id = CTF_ERR;
+#endif
 				free(buf);
 			} else {
+#ifdef _WIN32
+				for (i = 0; i < dmp->dm_npidmods; i++) {
+					fp = dt_module_getctf(dtp, dmp->dm_pidmods[i]);
+					if (fp == NULL)
+						continue;
+					if ((id = ctf_lookup_by_name(fp, name)) != CTF_ERR)
+						break;
+					if (justone && (id = dt_module_import_type(dmp->dm_pidmods[i],
+					                         name, 0) != CTF_ERR))
+						break;
+				}
+#else
 				for (i = 0; i < dmp->dm_nctflibs; i++) {
 					fp = dmp->dm_libctfp[i];
 					id = ctf_lookup_by_name(fp, name);
 					if (id != CTF_ERR)
 						break;
 				}
+#endif
 			}
 		}
 		if (id != CTF_ERR) {
@@ -1693,7 +3315,11 @@ dtrace_symbol_type(dtrace_hdl_t *dtp, const GElf_Sym *symp,
 	if ((dmp = dt_module_lookup_by_name(dtp, sip->dts_object)) == NULL)
 		return (dt_set_errno(dtp, EDT_NOMOD));
 
+#ifdef _WIN32
+	if (symp->st_tag == SymTagNull) {
+#else
 	if (symp->st_shndx == SHN_UNDEF && dmp->dm_extern != NULL) {
+#endif
 		dt_ident_t *idp =
 		    dt_idhash_lookup(dmp->dm_extern, sip->dts_name);
 
@@ -1703,18 +3329,24 @@ dtrace_symbol_type(dtrace_hdl_t *dtp, const GElf_Sym *symp,
 		tip->dtt_ctfp = idp->di_ctfp;
 		tip->dtt_type = idp->di_type;
 
+#ifdef _WIN32
+	} else if (symp->st_tag != SymTagFunction) {
+#else
 	} else if (GELF_ST_TYPE(symp->st_info) != STT_FUNC) {
+#endif
 		if (dt_module_getctf(dtp, dmp) == NULL)
 			return (-1); /* errno is set for us */
 
 		tip->dtt_ctfp = dmp->dm_ctfp;
+#ifdef _WIN32
+		tip->dtt_type = dt_module_import_type(dmp, NULL, symp->st_type_idx);
+#else
 		tip->dtt_type = ctf_lookup_by_symbol(dmp->dm_ctfp, sip->dts_id);
-
+#endif
 		if (tip->dtt_type == CTF_ERR) {
 			dtp->dt_ctferr = ctf_errno(tip->dtt_ctfp);
 			return (dt_set_errno(dtp, EDT_CTF));
 		}
-
 	} else {
 		tip->dtt_ctfp = DT_FPTR_CTFP(dtp);
 		tip->dtt_type = DT_FPTR_TYPE(dtp);
@@ -1737,13 +3369,17 @@ dt_module_info(const dt_module_t *dmp, dtrace_objinfo_t *dto)
 	if (dmp->dm_flags & DT_DM_PRIMARY)
 		dto->dto_flags |= DTRACE_OBJ_F_PRIMARY;
 
+#ifdef _WIN32
+	dto->dto_image_base = dmp->dm_image_base;
+	dto->dto_image_size = dmp->dm_image_size;
+#else
 	dto->dto_text_va = dmp->dm_text_va;
 	dto->dto_text_size = dmp->dm_text_size;
 	dto->dto_data_va = dmp->dm_data_va;
 	dto->dto_data_size = dmp->dm_data_size;
 	dto->dto_bss_va = dmp->dm_bss_va;
 	dto->dto_bss_size = dmp->dm_bss_size;
-
+#endif
 	return (dto);
 }
 
@@ -1780,3 +3416,4 @@ dtrace_object_info(dtrace_hdl_t *dtp, const char *object, dtrace_objinfo_t *dto)
 	(void) dt_module_info(dmp, dto);
 	return (0);
 }
+

@@ -98,3 +98,8 @@ ctf_errno(ctf_file_t *fp)
 {
 	return (fp->ctf_errno);
 }
+
+void ctf_set_no_type_errno(ctf_file_t *fp)
+{
+	ctf_set_errno(fp,  ECTF_NOTYPEDAT);
+}

@@ -617,7 +617,7 @@ dt_print_member(const char *name, ctf_id_t id, ulong_t off, int depth,
 				    off % NBBY != 0 ||
 				    size > 8 ||
 				    size != ctf_type_size(ctfp, id)) {
-					(void) fprintf(fp, " :%lu", bits);
+					(void) fprintf(fp, " :%lu", (unsigned long)bits);
 				}
 			}
 
@@ -674,9 +674,15 @@ dtrace_print(dtrace_hdl_t *dtp, FILE *fp, const char *typename,
 	if (dmp->dm_pid != 0) {
 		libid = atoi(s + 1);
 		s = strchr(s + 1, '`');
+#ifdef _WIN32
+		if (s == NULL || libid > dmp->dm_npidmods)
+			return (0);
+		ctfp = dt_module_getctf(dtp, dmp->dm_pidmods[libid]);
+#else
 		if (s == NULL || libid > dmp->dm_nctflibs)
 			return (0);
 		ctfp = dmp->dm_libctfp[libid];
+#endif
 	} else {
 		ctfp = dt_module_getctf(dtp, dmp);
 	}
@@ -702,5 +708,5 @@ dtrace_print(dtrace_hdl_t *dtp, FILE *fp, const char *typename,
 
 	dt_print_trailing_braces(&pa, 0);
 
-	return (len);
+	return (int)(len);
 }

@@ -29,6 +29,10 @@
  */
 
 /*
+ * Portions Copyright Microsoft Corporation.
+ */
+
+/*
  * DTrace Process Control
  *
  * This file provides a set of routines that permit libdtrace and its clients
@@ -92,6 +96,8 @@
 #include <dt_proc.h>
 #include <dt_pid.h>
 #include <dt_impl.h>
+
+#ifndef _WIN32
 
 #ifndef illumos
 #include <sys/syscall.h>
@@ -222,6 +228,7 @@ dt_proc_bpdisable(dt_proc_t *dpr)
 
 	dt_dprintf("breakpoints disabled\n");
 }
+#endif /* _WIN32 */
 
 static void
 dt_proc_notify(dtrace_hdl_t *dtp, dt_proc_hash_t *dph, dt_proc_t *dpr,
@@ -250,6 +257,7 @@ dt_proc_notify(dtrace_hdl_t *dtp, dt_proc_hash_t *dph, dt_proc_t *dpr,
 	}
 }
 
+#ifndef _WIN32
 /*
  * Check to see if the control thread was requested to stop when the victim
  * process reached a particular event (why) rather than continuing the victim.
@@ -485,9 +493,14 @@ dt_proc_waitrun(dt_proc_t *dpr)
 #endif
 }
 
+#endif /* _WIN32 */
+
 typedef struct dt_proc_control_data {
 	dtrace_hdl_t *dpcd_hdl;			/* DTrace handle */
 	dt_proc_t *dpcd_proc;			/* proccess to control */
+#ifdef _WIN32
+	HANDLE dpcd_ready;			/* thread is running */
+#endif
 } dt_proc_control_data_t;
 
 /*
@@ -502,6 +515,60 @@ typedef struct dt_proc_control_data {
  * PCWSTOP directive directly to the underlying /proc/<pid>/ctl file.  If the
  * libdtrace client wishes to exit or abort our wait, SIGCANCEL can be used.
  */
+
+#ifdef _WIN32
+
+static DWORD WINAPI
+dt_proc_control(void *arg)
+{
+	dt_proc_control_data_t *datap = arg;
+	dtrace_hdl_t *dtp = (dtrace_hdl_t *)*(volatile dtrace_hdl_t **)&datap->dpcd_hdl;
+	dt_proc_t *dpr = (dt_proc_t *)*(volatile dt_proc_t **)&datap->dpcd_proc;
+	dt_proc_hash_t *dph = dtp->dt_procs;
+	struct ps_prochandle *P = dpr->dpr_proc;
+	int pid = dpr->dpr_pid;
+	int notify = B_FALSE;
+	HANDLE h[2];
+
+	h[0] = (HANDLE)proc_gethandle(P);
+	h[1] = dpr->dpr_event;
+
+	/* Let creator know that it is safe to destroy datap */
+	SetEvent(datap->dpcd_ready);
+
+	while (!dpr->dpr_quit) {
+		DWORD w = WaitForMultipleObjects(2, h, FALSE, INFINITE);
+		if (WAIT_OBJECT_0 == w) {
+			(void) pthread_mutex_lock(&dpr->dpr_lock);
+			dt_dprintf("pid %d: proc died\n", pid);
+			dpr->dpr_quit = B_TRUE;
+			notify = B_TRUE;
+			(void) pthread_mutex_unlock(&dpr->dpr_lock);
+		}
+	}
+
+	/*
+	 * If the control thread detected PS_UNDEAD or PS_LOST, then enqueue
+	 * the dt_proc_t structure on the dt_proc_hash_t notification list.
+	 */
+	if (notify)
+		dt_proc_notify(dtp, dph, dpr, NULL);
+
+	/*
+	 * Destroy and remove any remaining breakpoints, set dpr_done and clear
+	 * dpr_tid to indicate the control thread has exited, and notify any
+	 * waiting thread in dt_proc_destroy() that we have succesfully exited.
+	 */
+	(void) pthread_mutex_lock(&dpr->dpr_lock);
+
+	dpr->dpr_done = B_TRUE;
+	(void) pthread_mutex_unlock(&dpr->dpr_lock);
+
+	return 0;
+}
+
+#else
+
 static void *
 dt_proc_control(void *arg)
 {
@@ -716,6 +783,7 @@ pwait_locked:
 
 	return (NULL);
 }
+#endif
 
 /*PRINTFLIKE3*/
 static struct ps_prochandle *
@@ -729,6 +797,12 @@ dt_proc_error(dtrace_hdl_t *dtp, dt_proc_t *dpr, const char *format, ...)
 
 	if (dpr->dpr_proc != NULL)
 		Prelease(dpr->dpr_proc, 0);
+
+#ifdef _WIN32
+	if (NULL != dpr->dpr_event) {
+		CloseHandle(dpr->dpr_event);
+	}
+#endif
 
 	dt_free(dtp, dpr);
 	(void) dt_set_errno(dtp, EDT_COMPILER);
@@ -813,6 +887,12 @@ dt_proc_destroy(dtrace_hdl_t *dtp, struct ps_prochandle *P)
 		 */
 		(void) pthread_mutex_lock(&dpr->dpr_lock);
 		dpr->dpr_quit = B_TRUE;
+#ifdef _WIN32
+		(void) pthread_mutex_unlock(&dpr->dpr_lock);
+		SetEvent(dpr->dpr_event);
+		WaitForSingleObject(dpr->dpr_tid, INFINITE);
+		CloseHandle(dpr->dpr_tid);
+#else
 #ifdef illumos
 		(void) _lwp_kill(dpr->dpr_tid, SIGCANCEL);
 #else
@@ -833,6 +913,7 @@ dt_proc_destroy(dtrace_hdl_t *dtp, struct ps_prochandle *P)
 			(void) pthread_cond_wait(&dpr->dpr_cv, &dpr->dpr_lock);
 
 		(void) pthread_mutex_unlock(&dpr->dpr_lock);
+#endif
 	}
 
 	/*
@@ -866,12 +947,56 @@ dt_proc_destroy(dtrace_hdl_t *dtp, struct ps_prochandle *P)
 
 	dt_list_delete(&dph->dph_lrulist, dpr);
 	Prelease(dpr->dpr_proc, rflag);
+
+#ifdef _WIN32
+	if (NULL != dpr->dpr_event) {
+		CloseHandle(dpr->dpr_event);
+	}
+#endif
+
 	dt_free(dtp, dpr);
 }
 
 static int
 dt_proc_create_thread(dtrace_hdl_t *dtp, dt_proc_t *dpr, uint_t stop)
 {
+#ifdef _WIN32
+	dt_proc_control_data_t data;
+	DWORD tid;
+
+	dpr->dpr_event = CreateEvent(NULL, FALSE, FALSE, NULL);
+	if (NULL == dpr->dpr_event) {
+		goto error;
+	}
+
+	data.dpcd_hdl = dtp;
+	data.dpcd_proc = dpr;
+	data.dpcd_ready = CreateEvent(NULL, TRUE, FALSE, NULL);
+	if (NULL == data.dpcd_ready) {
+		goto error;
+	}
+
+	(void) pthread_mutex_lock(&dpr->dpr_lock);
+	dpr->dpr_tid = CreateThread(NULL, 0, dt_proc_control, &data, CREATE_SUSPENDED, &tid);
+	if (NULL == dpr->dpr_tid) {
+		CloseHandle(data.dpcd_ready);
+		goto error;
+	}
+
+	ResumeThread(dpr->dpr_tid);
+	WaitForSingleObject(data.dpcd_ready, INFINITE);
+	CloseHandle(data.dpcd_ready);
+
+	(void) pthread_mutex_unlock(&dpr->dpr_lock);
+	return 0;
+
+error:
+	(void) dt_proc_error(dpr->dpr_hdl, dpr,
+			 "failed to create control thread for process-id %d: %s\n",
+			 (int)dpr->dpr_pid, strerror(ENOMEM));
+	return -1;
+
+#else
 	dt_proc_control_data_t data;
 	sigset_t nset, oset;
 	pthread_attr_t a;
@@ -952,6 +1077,7 @@ dt_proc_create_thread(dtrace_hdl_t *dtp, dt_proc_t *dpr, uint_t stop)
 	(void) pthread_attr_destroy(&a);
 
 	return (err);
+#endif
 }
 
 struct ps_prochandle *
@@ -966,7 +1092,9 @@ dt_proc_create(dtrace_hdl_t *dtp, const char *file, char *const *argv,
 		return (NULL); /* errno is set for us */
 
 	(void) pthread_mutex_init(&dpr->dpr_lock, NULL);
+#ifndef _WIN32
 	(void) pthread_cond_init(&dpr->dpr_cv, NULL);
+#endif
 
 #ifdef illumos
 	dpr->dpr_proc = Pxcreate(file, argv, dtp->dt_proc_env, &err, NULL, 0);
@@ -1046,7 +1174,9 @@ dt_proc_grab(dtrace_hdl_t *dtp, pid_t pid, int flags, int nomonitor)
 		return (NULL); /* errno is set for us */
 
 	(void) pthread_mutex_init(&dpr->dpr_lock, NULL);
+#ifndef _WIN32
 	(void) pthread_cond_init(&dpr->dpr_cv, NULL);
+#endif
 
 #ifdef illumos
 	if ((dpr->dpr_proc = Pgrab(pid, flags, &err)) == NULL) {
@@ -1120,6 +1250,9 @@ dt_proc_release(dtrace_hdl_t *dtp, struct ps_prochandle *P)
 void
 dt_proc_continue(dtrace_hdl_t *dtp, struct ps_prochandle *P)
 {
+#ifdef _WIN32
+	proc_continue(P);
+#else
 	dt_proc_t *dpr = dt_proc_lookup(dtp, P, B_FALSE);
 
 	(void) pthread_mutex_lock(&dpr->dpr_lock);
@@ -1130,6 +1263,7 @@ dt_proc_continue(dtrace_hdl_t *dtp, struct ps_prochandle *P)
 	}
 
 	(void) pthread_mutex_unlock(&dpr->dpr_lock);
+#endif
 }
 
 void
@@ -1151,7 +1285,9 @@ dt_proc_unlock(dtrace_hdl_t *dtp, struct ps_prochandle *P)
 void
 dt_proc_init(dtrace_hdl_t *dtp)
 {
+#ifndef _MSC_VER
 	extern char **environ;
+#endif
 	static char *envdef[] = {
 		"LD_NOLAZYLOAD=1",	/* linker lazy loading hides funcs */
 		NULL

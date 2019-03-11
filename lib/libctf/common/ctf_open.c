@@ -27,6 +27,9 @@
 /*
  * Copyright (c) 2013, Joyent, Inc.  All rights reserved.
  */
+/*
+ * Portions Copyright Microsoft Corporation.
+ */
 
 #include <ctf_impl.h>
 #include <sys/mman.h>
@@ -44,16 +47,11 @@ const char _CTF_NULLSTR[] = "";
 int _libctf_version = CTF_VERSION;	/* library client version */
 int _libctf_debug = 0;			/* debugging messages enabled */
 
+#ifndef _WIN32
 static ushort_t
 get_kind_v1(ushort_t info)
 {
 	return (CTF_INFO_KIND_V1(info));
-}
-
-static ushort_t
-get_kind_v2(ushort_t info)
-{
-	return (CTF_INFO_KIND(info));
 }
 
 static ushort_t
@@ -63,15 +61,22 @@ get_root_v1(ushort_t info)
 }
 
 static ushort_t
-get_root_v2(ushort_t info)
-{
-	return (CTF_INFO_ISROOT(info));
-}
-
-static ushort_t
 get_vlen_v1(ushort_t info)
 {
 	return (CTF_INFO_VLEN_V1(info));
+}
+#endif
+
+static ushort_t
+get_kind_v2(ushort_t info)
+{
+	return (CTF_INFO_KIND(info));
+}
+
+static ushort_t
+get_root_v2(ushort_t info)
+{
+	return (CTF_INFO_ISROOT(info));
 }
 
 static ushort_t
@@ -82,10 +87,15 @@ get_vlen_v2(ushort_t info)
 
 static const ctf_fileops_t ctf_fileops[] = {
 	{ NULL, NULL },
+#ifdef _WIN32
+	{ NULL, NULL },
+#else
 	{ get_kind_v1, get_root_v1, get_vlen_v1 },
+#endif
 	{ get_kind_v2, get_root_v2, get_vlen_v2 },
 };
 
+#ifndef _WIN32
 /*
  * Convert a 32-bit ELF symbol into GElf (Elf64) and return a pointer to it.
  */
@@ -191,6 +201,7 @@ init_symtab(ctf_file_t *fp, const ctf_header_t *hp,
 	ctf_dprintf("loaded %lu symtab entries\n", fp->ctf_nsyms);
 	return (0);
 }
+#endif
 
 /*
  * Initialize the type ID translation table with the byte offset of each type,
@@ -554,9 +565,11 @@ ctf_bufopen(const ctf_sect_t *ctfsect, const ctf_sect_t *symsect,
 	if (ctfsect == NULL || ((symsect == NULL) != (strsect == NULL)))
 		return (ctf_set_open_errno(errp, EINVAL));
 
+#ifndef _WIN32
 	if (symsect != NULL && symsect->cts_entsize != sizeof (Elf32_Sym) &&
 	    symsect->cts_entsize != sizeof (Elf64_Sym))
 		return (ctf_set_open_errno(errp, ECTF_SYMTAB));
+#endif
 
 	if (symsect != NULL && symsect->cts_data == NULL)
 		return (ctf_set_open_errno(errp, ECTF_SYMBAD));
@@ -588,6 +601,7 @@ ctf_bufopen(const ctf_sect_t *ctfsect, const ctf_sect_t *symsect,
 		bcopy(ctfsect->cts_data, &hp, sizeof (hp));
 		hdrsz = sizeof (ctf_header_t);
 
+#ifndef _WIN32
 	} else if (pp->ctp_version == CTF_VERSION_1) {
 		const ctf_header_v1_t *h1p =
 		    (const ctf_header_v1_t *)ctfsect->cts_data;
@@ -604,6 +618,7 @@ ctf_bufopen(const ctf_sect_t *ctfsect, const ctf_sect_t *symsect,
 		hp.cth_strlen = h1p->cth_strlen;
 
 		hdrsz = sizeof (ctf_header_v1_t);
+#endif
 	} else
 		return (ctf_set_open_errno(errp, ECTF_CTFVERS));
 
@@ -632,6 +647,9 @@ ctf_bufopen(const ctf_sect_t *ctfsect, const ctf_sect_t *symsect,
 	 * the data section's buffer pointer into ctf_buf, below.
 	 */
 	if (hp.cth_flags & CTF_F_COMPRESS) {
+#ifdef _WIN32
+		assert(FALSE);
+#else
 		size_t srclen, dstlen;
 		const void *src;
 		int rc = Z_OK;
@@ -664,7 +682,7 @@ ctf_bufopen(const ctf_sect_t *ctfsect, const ctf_sect_t *symsect,
 		}
 
 		ctf_data_protect(base, size + hdrsz);
-
+#endif
 	} else {
 		base = (void *)ctfsect->cts_data;
 		buf = (uchar_t *)base + hdrsz;
@@ -730,6 +748,7 @@ ctf_bufopen(const ctf_sect_t *ctfsect, const ctf_sect_t *symsect,
 	 * If we have a symbol table section, allocate and initialize
 	 * the symtab translation table, pointed to by ctf_sxlate.
 	 */
+#ifndef _WIN32
 	if (symsect != NULL) {
 		fp->ctf_nsyms = symsect->cts_size / symsect->cts_entsize;
 		fp->ctf_sxlate = ctf_alloc(fp->ctf_nsyms * sizeof (uint_t));
@@ -744,6 +763,7 @@ ctf_bufopen(const ctf_sect_t *ctfsect, const ctf_sect_t *symsect,
 			goto bad;
 		}
 	}
+#endif
 
 	if ((err = init_types(fp, &hp)) != 0) {
 		(void) ctf_set_open_errno(errp, err);
@@ -771,12 +791,14 @@ ctf_bufopen(const ctf_sect_t *ctfsect, const ctf_sect_t *symsect,
 	fp->ctf_lookups[4].ctl_len = 0;
 	fp->ctf_lookups[4].ctl_hash = NULL;
 
+#ifndef _WIN32
 	if (symsect != NULL) {
 		if (symsect->cts_entsize == sizeof (Elf64_Sym))
 			(void) ctf_setmodel(fp, CTF_MODEL_LP64);
 		else
 			(void) ctf_setmodel(fp, CTF_MODEL_ILP32);
 	} else
+#endif
 		(void) ctf_setmodel(fp, CTF_MODEL_NATIVE);
 
 	fp->ctf_refcnt = 1;
@@ -909,12 +931,16 @@ ctf_close(ctf_file_t *fp)
 	ctf_free(fp->ctf_dthash, fp->ctf_dthashlen * sizeof (ctf_dtdef_t *));
 
 	if (fp->ctf_flags & LCTF_MMAP) {
+#ifdef _WIN32
+		assert(FALSE);
+#else
 		if (fp->ctf_data.cts_data != NULL)
 			ctf_sect_munmap(&fp->ctf_data);
 		if (fp->ctf_symtab.cts_data != NULL)
 			ctf_sect_munmap(&fp->ctf_symtab);
 		if (fp->ctf_strtab.cts_data != NULL)
 			ctf_sect_munmap(&fp->ctf_strtab);
+#endif
 	}
 
 	if (fp->ctf_data.cts_name != _CTF_NULLSTR &&

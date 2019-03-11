@@ -27,6 +27,9 @@
  * Copyright (c) 2013 by Delphix. All rights reserved.
  * Copyright (c) 2013, Joyent, Inc. All rights reserved.
  */
+/*
+ * Portions Copyright Microsoft Corporation.
+ */
 
 #include <string.h>
 #include <stdlib.h>
@@ -53,14 +56,16 @@
  */
 #define YY_INPUT(buf,result,max_size) \
 	if (yypcb->pcb_fileptr != NULL) { \
-		if (((result = fread(buf, 1, max_size, yypcb->pcb_fileptr)) == 0) \
+		if (((result = (int)fread(buf, 1, max_size, yypcb->pcb_fileptr)) == 0) \
 		    && ferror(yypcb->pcb_fileptr)) \
 			longjmp(yypcb->pcb_jmpbuf, EDT_FIO); \
 	} else { \
 		int n; \
 		for (n = 0; n < max_size && \
-		    yypcb->pcb_strptr < yypcb->pcb_string + yypcb->pcb_strlen; n++) \
+		    yypcb->pcb_strptr < yypcb->pcb_string + yypcb->pcb_strlen; n++) {\
 			buf[n] = *yypcb->pcb_strptr++; \
+			if (buf[n] == '\r') n--; \
+		} \
 		result = n; \
 	}
 /*
@@ -699,7 +704,7 @@ if (yypcb->pcb_token != 0) {
 void
 yybegin(yystate_t state)
 {
-#ifdef	YYDEBUG
+#if	YYDEBUG
 	yydebug = _dtrace_debug;
 #endif
 	if (yypcb->pcb_yystate == state)

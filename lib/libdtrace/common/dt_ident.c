@@ -25,6 +25,9 @@
  * Copyright (c) 2013 by Delphix. All rights reserved.
  * Copyright (c) 2013 Joyent, Inc. All rights reserved.
  */
+/*
+ * Portions Copyright Microsoft Corporation.
+ */
 
 #pragma ident	"%Z%%M%	%I%	%E% SMI"
 
@@ -835,6 +838,9 @@ dt_idhash_delete(dt_idhash_t *dhp, dt_ident_t *key)
 }
 
 static int
+#ifdef _MSC_VER
+__cdecl
+#endif
 dt_idhash_comp(const void *lp, const void *rp)
 {
 	const dt_ident_t *lhs = *((const dt_ident_t **)lp);

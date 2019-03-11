@@ -28,6 +28,9 @@
  * Copyright (c) 2013, Joyent, Inc. All rights reserved.
  * Copyright (c) 2012 by Delphix. All rights reserved.
  */
+/*
+ * Portions Copyright Microsoft Corporation.
+ */
 
 #include <sys/resource.h>
 #include <sys/mman.h>
@@ -70,6 +73,7 @@ dt_opt_amin(dtrace_hdl_t *dtp, const char *arg, uintptr_t option)
 		return (dt_set_errno(dtp, EDT_BADOPTVAL));
 
 	dt_dprintf("set compiler attribute minimum to %s\n",
+
 	    dtrace_attr2str(attr, str, sizeof (str)));
 
 	if (dtp->dt_pcb != NULL) {
@@ -84,8 +88,14 @@ dt_opt_amin(dtrace_hdl_t *dtp, const char *arg, uintptr_t option)
 }
 
 static void
+#ifdef _MSC_VER
+__cdecl
+#endif
 dt_coredump(void)
 {
+#if defined(_WIN32)
+	RaiseFailFastException(NULL, NULL, 0);
+#else
 	const char msg[] = "libdtrace DEBUG: [ forcing coredump ]\n";
 
 	struct sigaction act;
@@ -104,6 +114,7 @@ dt_coredump(void)
 
 	(void) setrlimit(RLIMIT_CORE, &lim);
 	abort();
+#endif
 }
 
 /*ARGSUSED*/
@@ -810,6 +821,23 @@ dt_opt_strsize(dtrace_hdl_t *dtp, const char *arg, uintptr_t option)
 	return (0);
 }
 
+static int
+dt_opt_sympath(dtrace_hdl_t *dtp, const char *arg, uintptr_t option)
+{
+	dtrace_optval_t val = DTRACEOPT_UNSET;
+
+	if (arg && *arg) {
+		val = (dtrace_optval_t)arg;
+	}
+
+#ifdef _WIN32
+	SymSetSearchPath(GetCurrentProcess(), arg);
+#endif
+
+	dtp->dt_options[option] = val;
+	return (0);
+}
+
 static const struct {
 	const char *dtbp_name;
 	int dtbp_policy;
@@ -894,7 +922,7 @@ dt_options_load(dtrace_hdl_t *dtp)
 	bzero(&hdr, sizeof (dof_hdr_t));
 	hdr.dofh_loadsz = sizeof (dof_hdr_t);
 
-#ifdef illumos
+#if defined(illumos) || defined(_WIN32)
 	if (dt_ioctl(dtp, DTRACEIOC_DOFGET, &hdr) == -1)
 #else
 	dof = &hdr;
@@ -912,7 +940,7 @@ dt_options_load(dtrace_hdl_t *dtp)
 	for (i = 0; i < DTRACEOPT_MAX; i++)
 		dtp->dt_options[i] = DTRACEOPT_UNSET;
 
-#ifdef illumos
+#if defined(illumos) || defined(_WIN32)
 	if (dt_ioctl(dtp, DTRACEIOC_DOFGET, dof) == -1)
 #else
 	if (dt_ioctl(dtp, DTRACEIOC_DOFGET, &dof) == -1)
@@ -1024,6 +1052,7 @@ static const dt_option_t _dtrace_rtoptions[] = {
 	{ "stackframes", dt_opt_runtime, DTRACEOPT_STACKFRAMES },
 	{ "statusrate", dt_opt_rate, DTRACEOPT_STATUSRATE },
 	{ "strsize", dt_opt_strsize, DTRACEOPT_STRSIZE },
+	{ "sympath", dt_opt_sympath, DTRACEOPT_SYMPATH },
 	{ "ustackframes", dt_opt_runtime, DTRACEOPT_USTACKFRAMES },
 	{ "temporal", dt_opt_runtime, DTRACEOPT_TEMPORAL },
 	{ NULL, NULL, 0 }

@@ -196,7 +196,7 @@ static dof_stridx_t
 dof_add_string(dt_dof_t *ddo, const char *s)
 {
 	dt_buf_t *bp = &ddo->ddo_strs;
-	dof_stridx_t i = dt_buf_len(bp);
+	dof_stridx_t i = (dof_stridx_t)dt_buf_len(bp);
 
 	if (i != 0 && (s == NULL || *s == '\0'))
 		return (0); /* string table has \0 at offset 0 */
@@ -411,21 +411,21 @@ dof_add_probe(dt_idhash_t *dhp, dt_ident_t *idp, void *data)
 
 	dofpr.dofpr_addr = 0;
 	dofpr.dofpr_name = dof_add_string(ddo, prp->pr_name);
-	dofpr.dofpr_nargv = dt_buf_len(&ddo->ddo_strs);
+	dofpr.dofpr_nargv = (dof_stridx_t)dt_buf_len(&ddo->ddo_strs);
 
 	for (dnp = prp->pr_nargs; dnp != NULL; dnp = dnp->dn_list) {
 		(void) dof_add_string(ddo, ctf_type_name(dnp->dn_ctfp,
 		    dnp->dn_type, buf, sizeof (buf)));
 	}
 
-	dofpr.dofpr_xargv = dt_buf_len(&ddo->ddo_strs);
+	dofpr.dofpr_xargv = (dof_stridx_t)dt_buf_len(&ddo->ddo_strs);
 
 	for (dnp = prp->pr_xargs; dnp != NULL; dnp = dnp->dn_list) {
 		(void) dof_add_string(ddo, ctf_type_name(dnp->dn_ctfp,
 		    dnp->dn_type, buf, sizeof (buf)));
 	}
 
-	dofpr.dofpr_argidx = dt_buf_len(&ddo->ddo_args) / sizeof (uint8_t);
+	dofpr.dofpr_argidx = (uint32_t)dt_buf_len(&ddo->ddo_args) / sizeof (uint8_t);
 
 	for (i = 0; i < prp->pr_xargc; i++) {
 		dt_buf_write(dtp, &ddo->ddo_args, &prp->pr_mapping[i],
@@ -450,13 +450,13 @@ dof_add_probe(dt_idhash_t *dhp, dt_ident_t *idp, void *data)
 		 */
 		assert(pip->pi_noffs + pip->pi_nenoffs > 0);
 
-		dofpr.dofpr_offidx =
+		dofpr.dofpr_offidx = (uint32_t)
 		    dt_buf_len(&ddo->ddo_offs) / sizeof (uint32_t);
 		dofpr.dofpr_noffs = pip->pi_noffs;
 		dt_buf_write(dtp, &ddo->ddo_offs, pip->pi_offs,
 		    pip->pi_noffs * sizeof (uint32_t), sizeof (uint32_t));
 
-		dofpr.dofpr_enoffidx =
+		dofpr.dofpr_enoffidx = (uint32_t)
 		    dt_buf_len(&ddo->ddo_enoffs) / sizeof (uint32_t);
 		dofpr.dofpr_nenoffs = pip->pi_nenoffs;
 		dt_buf_write(dtp, &ddo->ddo_enoffs, pip->pi_enoffs,
@@ -629,8 +629,8 @@ dtrace_dof_create(dtrace_hdl_t *dtp, dtrace_prog_t *pgp, uint_t flags)
 	const dtrace_actdesc_t *ap;
 	const dt_stmt_t *stp;
 
-	uint_t maxacts = 0;
-	uint_t maxfmt = 0;
+	size_t maxacts = 0;
+	size_t maxfmt = 0;
 
 	dt_provider_t *pvp;
 	dt_xlator_t *dxp;
@@ -641,7 +641,7 @@ dtrace_dof_create(dtrace_hdl_t *dtp, dtrace_prog_t *pgp, uint_t flags)
 
 	dt_buf_t dof;
 	char *fmt;
-	uint_t i;
+	size_t i;
 
 	if (flags & ~DTRACE_D_MASK) {
 		(void) dt_set_errno(dtp, EINVAL);
@@ -864,7 +864,7 @@ dtrace_dof_create(dtrace_hdl_t *dtp, dtrace_prog_t *pgp, uint_t flags)
 	 * iterate over the buffer data directly, we must check for errors.
 	 */
 	if ((i = dt_buf_error(&ddo->ddo_secs)) != 0) {
-		(void) dt_set_errno(dtp, i);
+		(void) dt_set_errno(dtp, (int)i);
 		return (NULL);
 	}
 

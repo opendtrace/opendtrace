@@ -27,6 +27,9 @@
 /*
  * Copyright (c) 2013, Joyent, Inc.  All rights reserved.
  */
+/*
+ * Portions Copyright Microsoft Corporation.
+ */
 
 #include <sys/sysmacros.h>
 #include <sys/param.h>
@@ -95,7 +98,7 @@ ctf_copy_smembers(ctf_dtdef_t *dtd, uint_t soff, uchar_t *t)
 	for (; dmd != NULL; dmd = ctf_list_next(dmd)) {
 		if (dmd->dmd_name) {
 			ctm.ctm_name = soff;
-			soff += strlen(dmd->dmd_name) + 1;
+			soff += (uint_t)strlen(dmd->dmd_name) + 1;
 		} else
 			ctm.ctm_name = 0;
 
@@ -118,7 +121,7 @@ ctf_copy_lmembers(ctf_dtdef_t *dtd, uint_t soff, uchar_t *t)
 	for (; dmd != NULL; dmd = ctf_list_next(dmd)) {
 		if (dmd->dmd_name) {
 			ctlm.ctlm_name = soff;
-			soff += strlen(dmd->dmd_name) + 1;
+			soff += (uint_t)strlen(dmd->dmd_name) + 1;
 		} else
 			ctlm.ctlm_name = 0;
 
@@ -143,7 +146,7 @@ ctf_copy_emembers(ctf_dtdef_t *dtd, uint_t soff, uchar_t *t)
 	for (; dmd != NULL; dmd = ctf_list_next(dmd)) {
 		cte.cte_name = soff;
 		cte.cte_value = dmd->dmd_value;
-		soff += strlen(dmd->dmd_name) + 1;
+		soff += (uint_t)strlen(dmd->dmd_name) + 1;
 		bcopy(&cte, t, sizeof (cte));
 		t += sizeof (cte);
 	}
@@ -209,7 +212,7 @@ ctf_ref_dec(ctf_file_t *fp, ctf_id_t tid)
 	if (!(fp->ctf_flags & LCTF_RDWR))
 		return;
 
-	ASSERT(dtd->dtd_ref >= 1);
+	assert(dtd->dtd_ref >= 1);
 	dtd->dtd_ref--;
 }
 
@@ -308,8 +311,8 @@ ctf_update(ctf_file_t *fp)
 	 * entire CTF buffer we need, and then allocate a new buffer and
 	 * bcopy the finished header to the start of the buffer.
 	 */
-	hdr.cth_stroff = hdr.cth_typeoff + size;
-	hdr.cth_strlen = fp->ctf_dtstrlen;
+	hdr.cth_stroff = (uint_t)(hdr.cth_typeoff + size);
+	hdr.cth_strlen = (uint_t)fp->ctf_dtstrlen;
 	size = sizeof (ctf_header_t) + hdr.cth_stroff + hdr.cth_strlen;
 
 	if ((buf = ctf_data_alloc(size)) == MAP_FAILED)
@@ -670,7 +673,7 @@ ctf_add_encoded(ctf_file_t *fp, uint_t flag,
 		return (CTF_ERR); /* errno is set for us */
 
 	dtd->dtd_data.ctt_info = CTF_TYPE_INFO(kind, flag, 0);
-	dtd->dtd_data.ctt_size = clp2(P2ROUNDUP(ep->cte_bits, NBBY) / NBBY);
+	dtd->dtd_data.ctt_size = (ushort_t)clp2(P2ROUNDUP(ep->cte_bits, NBBY) / NBBY);
 	dtd->dtd_u.dtu_enc = *ep;
 
 	return (type);
@@ -898,7 +901,7 @@ ctf_add_enum(ctf_file_t *fp, uint_t flag, const char *name)
 		return (CTF_ERR); /* errno is set for us */
 
 	dtd->dtd_data.ctt_info = CTF_TYPE_INFO(CTF_K_ENUM, flag, 0);
-	dtd->dtd_data.ctt_size = fp->ctf_dmodel->ctd_int;
+	dtd->dtd_data.ctt_size = (ushort_t)fp->ctf_dmodel->ctd_int;
 
 	return (type);
 }
@@ -1041,8 +1044,15 @@ ctf_add_enumerator(ctf_file_t *fp, ctf_id_t enid, const char *name, int value)
 int
 ctf_add_member(ctf_file_t *fp, ctf_id_t souid, const char *name, ctf_id_t type)
 {
+	return ctf_add_member_at(fp, souid, name, type, (size_t)-1);
+}
+
+int
+ctf_add_member_at(ctf_file_t *fp, ctf_id_t souid, const char *name, ctf_id_t type, size_t off)
+{
 	ctf_dtdef_t *dtd = ctf_dtd_lookup(fp, souid);
 	ctf_dmdef_t *dmd;
+	ctf_encoding_t info;
 
 	ssize_t msize, malign, ssize;
 	uint_t kind, vlen, root;
@@ -1090,36 +1100,42 @@ ctf_add_member(ctf_file_t *fp, ctf_id_t souid, const char *name, ctf_id_t type)
 	dmd->dmd_value = -1;
 
 	if (kind == CTF_K_STRUCT && vlen != 0) {
-		ctf_dmdef_t *lmd = ctf_list_prev(&dtd->dtd_u.dtu_members);
-		ctf_id_t ltype = ctf_type_resolve(fp, lmd->dmd_type);
-		size_t off = lmd->dmd_offset;
+		if (((size_t )-1 == off)) {
+		        ctf_dmdef_t *lmd = ctf_list_prev(&dtd->dtd_u.dtu_members);
+			ctf_id_t ltype = ctf_type_resolve(fp, lmd->dmd_type);
+			ctf_encoding_t linfo;
+			ssize_t lsize;
 
-		ctf_encoding_t linfo;
-		ssize_t lsize;
+			off = lmd->dmd_offset;
 
-		if (ctf_type_encoding(fp, ltype, &linfo) != CTF_ERR)
-			off += linfo.cte_bits;
-		else if ((lsize = ctf_type_size(fp, ltype)) != CTF_ERR)
-			off += lsize * NBBY;
+			if (ctf_type_encoding(fp, ltype, &linfo) != CTF_ERR)
+				off += linfo.cte_bits;
+			else if ((lsize = ctf_type_size(fp, ltype)) != CTF_ERR)
+				off += lsize * NBBY;
 
-		/*
-		 * Round up the offset of the end of the last member to the
-		 * next byte boundary, convert 'off' to bytes, and then round
-		 * it up again to the next multiple of the alignment required
-		 * by the new member.  Finally, convert back to bits and store
-		 * the result in dmd_offset.  Technically we could do more
-		 * efficient packing if the new member is a bit-field, but
-		 * we're the "compiler" and ANSI says we can do as we choose.
-		 */
-		off = roundup(off, NBBY) / NBBY;
-		off = roundup(off, MAX(malign, 1));
+			/*
+			 * Round up the offset of the end of the last member to the
+			 * next byte boundary, convert 'off' to bytes, and then round
+			 * it up again to the next multiple of the alignment required
+			 * by the new member.  Finally, convert back to bits and store
+			 * the result in dmd_offset.  Technically we could do more
+			 * efficient packing if the new member is a bit-field, but
+			 * we're the "compiler" and ANSI says we can do as we choose.
+			 */
+			off = roundup(off, NBBY) / NBBY;
+			off = roundup(off, MAX(malign, 1));
+		}
+
 		dmd->dmd_offset = off * NBBY;
 		ssize = off + msize;
 	} else {
 		dmd->dmd_offset = 0;
-		ssize = ctf_get_ctt_size(fp, &dtd->dtd_data, NULL, NULL);
+		ssize = dmd->dmd_offset + ctf_get_ctt_size(fp, &dtd->dtd_data, NULL, NULL);
 		ssize = MAX(ssize, msize);
 	}
+
+	if (ctf_type_encoding(fp, type, &info) != CTF_ERR)
+		dmd->dmd_offset += info.cte_offset;
 
 	if (ssize > CTF_MAX_SIZE) {
 		dtd->dtd_data.ctt_size = CTF_LSIZE_SENT;

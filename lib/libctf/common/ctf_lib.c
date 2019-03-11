@@ -39,8 +39,11 @@
 #else
 #include <zlib.h>
 #endif
+#ifndef _WIN32
 #include <gelf.h>
+#endif
 
+#ifndef _WIN32
 #ifdef illumos
 #ifdef _LP64
 static const char *_libctf_zlib = "/usr/lib/64/libz.so";
@@ -481,6 +484,8 @@ ctf_open(const char *filename, int *errp)
 	(void) close(fd);
 	return (fp);
 }
+
+#endif
 
 /*
  * Write the uncompressed CTF data stream to the specified file descriptor.

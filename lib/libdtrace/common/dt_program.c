@@ -159,6 +159,12 @@ dtrace_program_exec(dtrace_hdl_t *dtp, dtrace_prog_t *pgp,
 
 	dtrace_program_info(dtp, pgp, pip);
 
+#ifdef _WIN32
+	if (pgp->dp_noexec) {
+		return (dt_set_errno(dtp, EACCES));
+	}
+#endif
+
 	if ((dof = dtrace_dof_create(dtp, pgp, DTRACE_D_STRIP)) == NULL)
 		return (-1);
 

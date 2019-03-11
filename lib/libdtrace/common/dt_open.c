@@ -24,6 +24,9 @@
  * Copyright (c) 2013, Joyent, Inc. All rights reserved.
  * Copyright (c) 2012, 2016 by Delphix. All rights reserved.
  */
+/*
+ * Portions Copyright Microsoft Corporation.
+ */
 
 #include <sys/types.h>
 #ifdef illumos
@@ -63,7 +66,7 @@
 #include <sys/sysctl.h>
 #include <string.h>
 #endif
-#if defined(__i386__)
+#if defined(__i386__) && !defined(_WIN32)
 #include <ieeefp.h>
 #endif
 
@@ -231,6 +234,7 @@ static const dt_ident_t _dtrace_globals[] = {
 { "commit", DT_IDENT_ACTFUNC, 0, DT_ACT_COMMIT, DT_ATTR_STABCMN, DT_VERS_1_0,
 	&dt_idops_func, "void(int)" },
 { "copyin", DT_IDENT_FUNC, 0, DIF_SUBR_COPYIN, DT_ATTR_STABCMN, DT_VERS_1_0,
+
 	&dt_idops_func, "void *(uintptr_t, size_t)" },
 { "copyinstr", DT_IDENT_FUNC, 0, DIF_SUBR_COPYINSTR,
 	DT_ATTR_STABCMN, DT_VERS_1_0,
@@ -249,6 +253,8 @@ static const dt_ident_t _dtrace_globals[] = {
 	DTRACE_CLASS_COMMON }, DT_VERS_1_0,
 #ifdef illumos
 	&dt_idops_type, "genunix`kthread_t *" },
+#elif defined(_WIN32)
+	&dt_idops_type, "nt`PETHREAD" },
 #else
 	&dt_idops_type, curthread_str },
 #endif
@@ -311,8 +317,13 @@ static const dt_ident_t _dtrace_globals[] = {
 #endif
 { "inet_ntop", DT_IDENT_FUNC, 0, DIF_SUBR_INET_NTOP, DT_ATTR_STABCMN,
 	DT_VERS_1_5, &dt_idops_func, "string(int, void *)" },
+#if defined(_WIN32)
+{ "irql", DT_IDENT_SCALAR, 0, DIF_VAR_IPL, DT_ATTR_STABCMN, DT_VERS_1_0,
+	&dt_idops_type, "nt`KIRQL" },
+#else
 { "ipl", DT_IDENT_SCALAR, 0, DIF_VAR_IPL, DT_ATTR_STABCMN, DT_VERS_1_0,
 	&dt_idops_type, "uint_t" },
+#endif
 #ifdef __FreeBSD__
 { "jailname", DT_IDENT_SCALAR, 0, DIF_VAR_JAILNAME,
 	DT_ATTR_STABCMN, DT_VERS_1_13, &dt_idops_type, "string" },
@@ -594,17 +605,29 @@ static const dt_intrinsic_t _dtrace_intrinsics_64[] = {
 { "char", { CTF_INT_SIGNED | CTF_INT_CHAR, 0, 8 }, CTF_K_INTEGER },
 { "short", { CTF_INT_SIGNED, 0, 16 }, CTF_K_INTEGER },
 { "int", { CTF_INT_SIGNED, 0, 32 }, CTF_K_INTEGER },
+#ifdef _WIN32
+{ "long", { CTF_INT_SIGNED, 0, 32 }, CTF_K_INTEGER },
+#else
 { "long", { CTF_INT_SIGNED, 0, 64 }, CTF_K_INTEGER },
+#endif
 { "long long", { CTF_INT_SIGNED, 0, 64 }, CTF_K_INTEGER },
 { "signed char", { CTF_INT_SIGNED | CTF_INT_CHAR, 0, 8 }, CTF_K_INTEGER },
 { "signed short", { CTF_INT_SIGNED, 0, 16 }, CTF_K_INTEGER },
 { "signed int", { CTF_INT_SIGNED, 0, 32 }, CTF_K_INTEGER },
+#ifdef _WIN32
+{ "signed long", { CTF_INT_SIGNED, 0, 32 }, CTF_K_INTEGER },
+#else
 { "signed long", { CTF_INT_SIGNED, 0, 64 }, CTF_K_INTEGER },
+#endif
 { "signed long long", { CTF_INT_SIGNED, 0, 64 }, CTF_K_INTEGER },
 { "unsigned char", { CTF_INT_CHAR, 0, 8 }, CTF_K_INTEGER },
 { "unsigned short", { 0, 0, 16 }, CTF_K_INTEGER },
 { "unsigned int", { 0, 0, 32 }, CTF_K_INTEGER },
+#ifdef _WIN32
+{ "unsigned long", { 0, 0, 32 }, CTF_K_INTEGER },
+#else
 { "unsigned long", { 0, 0, 64 }, CTF_K_INTEGER },
+#endif
 { "unsigned long long", { 0, 0, 64 }, CTF_K_INTEGER },
 { "_Bool", { CTF_INT_BOOL, 0, 8 }, CTF_K_INTEGER },
 { "float", { CTF_FP_SINGLE, 0, 32 }, CTF_K_FLOAT },
@@ -655,21 +678,21 @@ static const dt_typedef_t _dtrace_typedefs_64[] = {
 { "char", "int8_t" },
 { "short", "int16_t" },
 { "int", "int32_t" },
-{ "long", "int64_t" },
-{ "long", "intptr_t" },
-{ "long", "ssize_t" },
+{ "long long", "int64_t" },
+{ "long long", "intptr_t" },
+{ "long long", "ssize_t" },
 { "unsigned char", "uint8_t" },
 { "unsigned short", "uint16_t" },
 { "unsigned", "uint32_t" },
-{ "unsigned long", "uint64_t" },
+{ "unsigned long long", "uint64_t" },
 { "unsigned char", "uchar_t" },
 { "unsigned short", "ushort_t" },
 { "unsigned", "uint_t" },
 { "unsigned long", "ulong_t" },
 { "unsigned long long", "u_longlong_t" },
-{ "long", "ptrdiff_t" },
-{ "unsigned long", "uintptr_t" },
-{ "unsigned long", "size_t" },
+{ "long long", "ptrdiff_t" },
+{ "unsigned long long", "uintptr_t" },
+{ "unsigned long long", "size_t" },
 { "int", "id_t" },
 { "int", "pid_t" },
 { NULL, NULL }
@@ -695,8 +718,13 @@ static const dt_intdesc_t _dtrace_ints_32[] = {
 static const dt_intdesc_t _dtrace_ints_64[] = {
 { "int", NULL, CTF_ERR, 0x7fffffffULL },
 { "unsigned int", NULL, CTF_ERR, 0xffffffffULL },
+#ifdef _WIN32
+{ "long", NULL, CTF_ERR, 0xffffffffULL },
+{ "unsigned long", NULL, CTF_ERR, 0xffffffffULL },
+#else
 { "long", NULL, CTF_ERR, 0x7fffffffffffffffULL },
 { "unsigned long", NULL, CTF_ERR, 0xffffffffffffffffULL },
+#endif
 { "long long", NULL, CTF_ERR, 0x7fffffffffffffffULL },
 { "unsigned long long", NULL, CTF_ERR, 0xffffffffffffffffULL }
 };
@@ -726,7 +754,7 @@ static const dt_ident_t _dtrace_macros[] = {
  * contain definitions that should be present regardless of DTRACE_O_NOLIBS.
  */
 static const char _dtrace_hardwire[] = "\
-inline long NULL = 0; \n\
+inline intptr_t NULL = 0; \n\
 #pragma D binding \"1.0\" NULL\n\
 ";
 
@@ -783,6 +811,11 @@ const dtrace_pattr_t _dtrace_prvdesc = {
 { DTRACE_STABILITY_UNSTABLE, DTRACE_STABILITY_UNSTABLE, DTRACE_CLASS_COMMON },
 };
 
+#if defined(_WIN32)
+const char *_dtrace_provdir = "\\\\.\\dtrace\\provider"; /* provider directory */
+const char *_dtrace_defcpp = "cl.exe /c"; /* default cpp(1) to invoke */
+const char *_dtrace_defld = "link.exe";   /* default ld(1) to invoke */
+#else
 #ifdef illumos
 const char *_dtrace_defcpp = "/usr/ccs/lib/cpp"; /* default cpp(1) to invoke */
 const char *_dtrace_defld = "/usr/ccs/bin/ld";   /* default ld(1) to invoke */
@@ -799,6 +832,7 @@ const char *_dtrace_provdir = "/dev/dtrace/provider"; /* provider directory */
 const char *_dtrace_libdir32 = "/usr/lib32/dtrace";
 const char *_dtrace_provdir = "/dev/dtrace"; /* provider directory */
 #endif
+#endif
 
 int _dtrace_strbuckets = 211;	/* default number of hash buckets (prime) */
 int _dtrace_intbuckets = 256;	/* default number of integer buckets (Pof2) */
@@ -811,7 +845,9 @@ int _dtrace_argmax = 32;	/* default maximum number of probe arguments */
 
 int _dtrace_debug = 0;		/* debug messages enabled (off) */
 const char *const _dtrace_version = DT_VERS_STRING; /* API version string */
+#ifndef _WIN32
 int _dtrace_rdvers = RD_VERSION; /* rtld_db feature version */
+#endif
 
 typedef struct dt_fdlist {
 	int *df_fds;		/* array of provider driver file descriptors */
@@ -819,8 +855,14 @@ typedef struct dt_fdlist {
 	uint_t df_size;		/* size of df_fds[] */
 } dt_fdlist_t;
 
+const char *dtrace_version(void)
+{
+	return _dtrace_version;
+}
+
 #ifdef illumos
 #pragma init(_dtrace_init)
+#elif defined(_MSC_VER)
 #else
 void _dtrace_init(void) __attribute__ ((constructor));
 #endif
@@ -829,11 +871,14 @@ _dtrace_init(void)
 {
 	_dtrace_debug = getenv("DTRACE_DEBUG") != NULL;
 
+#ifndef _WIN32
 	for (; _dtrace_rdvers > 0; _dtrace_rdvers--) {
 		if (rd_init(_dtrace_rdvers) == RD_OK)
 			break;
 	}
-#if defined(__i386__)
+#endif
+
+#if defined(__i386__) && !defined(_WIN32)
 	/* make long doubles 64 bits -sson */
 	(void) fpsetprec(FP_PE);
 #endif
@@ -855,7 +900,9 @@ dt_provmod_open(dt_provmod_t **provmod, dt_fdlist_t *dfp)
 	dt_provmod_t *prov;
 	char path[PATH_MAX];
 	int fd;
-#ifdef illumos
+
+#if defined(illumos) || defined(_WIN32)
+
 	struct dirent *dp, *ep;
 	DIR *dirp;
 
@@ -880,8 +927,13 @@ dt_provmod_open(dt_provmod_t **provmod, dt_fdlist_t *dfp)
 			dfp->df_size = size;
 		}
 
+#ifdef _WIN32
+		(void) snprintf(path, sizeof (path), "%s\\%s",
+		    _dtrace_provdir, dp->d_name);
+#else
 		(void) snprintf(path, sizeof (path), "%s/%s",
 		    _dtrace_provdir, dp->d_name);
+#endif
 
 		if ((fd = open(path, O_RDONLY)) == -1)
 			continue; /* failed to open driver; just skip it */
@@ -902,7 +954,9 @@ dt_provmod_open(dt_provmod_t **provmod, dt_fdlist_t *dfp)
 	}
 
 	(void) closedir(dirp);
+
 #else	/* !illumos */
+
 	char	*p;
 	char	*p1;
 	char	*p_providers = NULL;
@@ -1033,7 +1087,9 @@ dt_vopen(int version, int flags, int *errp,
 	dt_module_t *dmp;
 	dt_provmod_t *provmod = NULL;
 	int i, err;
+#ifndef _WIN32
 	struct rlimit rl;
+#endif
 
 	const dt_intrinsic_t *dinp;
 	const dt_typedef_t *dtyp;
@@ -1078,12 +1134,15 @@ dt_vopen(int version, int flags, int *errp,
 	if (vector == NULL && arg != NULL)
 		return (set_open_errno(dtp, errp, EINVAL));
 
+#ifndef _WIN32
 	if (elf_version(EV_CURRENT) == EV_NONE)
 		return (set_open_errno(dtp, errp, EDT_ELFVERSION));
+#endif
 
 	if (vector != NULL || (flags & DTRACE_O_NODEV))
 		goto alloc; /* do not attempt to open dtrace device */
 
+#ifndef _WIN32
 	/*
 	 * Before we get going, crank our limit on file descriptors up to the
 	 * hard limit.  This is to allow for the fact that libproc keeps file
@@ -1096,7 +1155,7 @@ dt_vopen(int version, int flags, int *errp,
 		rl.rlim_cur = rl.rlim_max;
 		(void) setrlimit(RLIMIT_NOFILE, &rl);
 	}
-
+#endif
 	/*
 	 * Get the device path of each of the providers.  We hold them open
 	 * in the df.df_fds list until we open the DTrace driver itself,
@@ -1106,7 +1165,11 @@ dt_vopen(int version, int flags, int *errp,
 	 */
 	dt_provmod_open(&provmod, &df);
 
+#ifdef _WIN32
+	dtfd = open("\\\\.\\dtrace\\dtrace", O_RDWR);
+#else
 	dtfd = open("/dev/dtrace/dtrace", O_RDWR | O_CLOEXEC);
+#endif
 	err = errno; /* save errno from opening dtfd */
 #if defined(__FreeBSD__)
 	/*
@@ -1119,7 +1182,9 @@ dt_vopen(int version, int flags, int *errp,
 		err = errno;
 	}
 #endif
-#ifdef illumos
+#ifdef _WIN32
+	ftfd = open("\\\\.\\dtrace\\fasttrap", O_RDWR);
+#elif defined(illumos)
 	ftfd = open("/dev/dtrace/provider/fasttrap", O_RDWR);
 #else
 	ftfd = open("/dev/dtrace/fasttrap", O_RDWR | O_CLOEXEC);
@@ -1202,7 +1267,9 @@ alloc:
 	dtp->dt_vector = vector;
 	dtp->dt_varg = arg;
 	dt_dof_init(dtp);
+#ifndef _WIN32
 	(void) uname(&dtp->dt_uts);
+#endif
 
 	if (dtp->dt_mods == NULL || dtp->dt_provs == NULL ||
 	    dtp->dt_procs == NULL || dtp->dt_proc_env == NULL ||
@@ -1299,7 +1366,7 @@ alloc:
 	 * 'kern.bootfile' sysctl value tells us exactly which file is being
 	 * used as the kernel.
 	 */
-#ifndef illumos
+#if !defined(illumos) && !defined(_WIN32)
 	{
 	char bootfile[MAXPATHLEN];
 	char *p;
@@ -1576,7 +1643,7 @@ alloc:
 	 * Load hard-wired inlines into the definition cache by calling the
 	 * compiler on the raw definition string defined above.
 	 */
-	if ((pgp = dtrace_program_strcompile(dtp, _dtrace_hardwire,
+	if ((pgp = dt_program_strcompile(dtp, _dtrace_hardwire,
 	    DTRACE_PROBESPEC_NONE, DTRACE_C_EMPTY, 0, NULL)) == NULL) {
 		dt_dprintf("failed to load hard-wired definitions: %s\n",
 		    dtrace_errmsg(dtp, dtrace_errno(dtp)));
@@ -1585,6 +1652,15 @@ alloc:
 
 	dt_program_destroy(dtp, pgp);
 
+#ifdef _WIN32
+	/*
+	 * Win32 requires a user-mode symbol server to be running in this process
+	 * to support module:name->address resolution for fbt provider.
+	 */
+	dtp->dt_symsvr = dt_symsvr_start();
+#endif
+
+#ifndef _WIN32
 	/*
 	 * Set up the default DTrace library path.  Once set, the next call to
 	 * dt_compile() will compile all the libraries.  We intentionally defer
@@ -1604,6 +1680,7 @@ alloc:
 #else
 	if (dtrace_setopt(dtp, "libdir", _dtrace_libdir) != 0)
 		return (set_open_errno(dtp, errp, dtp->dt_errno));
+#endif
 #endif
 
 	return (dtp);
@@ -1676,6 +1753,11 @@ dtrace_close(dtrace_hdl_t *dtp)
 
 	while ((pvp = dt_list_next(&dtp->dt_provlist)) != NULL)
 		dt_provider_destroy(dtp, pvp);
+
+#ifdef _WIN32
+	if (dtp->dt_symsvr != NULL)
+		dt_symsvr_stop(dtp->dt_symsvr);
+#endif
 
 	if (dtp->dt_fd != -1)
 		(void) close(dtp->dt_fd);

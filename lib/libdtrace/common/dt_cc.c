@@ -25,6 +25,9 @@
  * Copyright (c) 2013, Joyent Inc. All rights reserved.
  * Copyright 2015 Gary Mills
  */
+/*
+ * Portions Copyright Microsoft Corporation.
+ */
 
 /*
  * DTrace D Language Compiler
@@ -117,7 +120,7 @@ static const dtrace_diftype_t dt_int_rtype = {
 	DIF_TYPE_CTF, CTF_K_INTEGER, 0, 0, sizeof (uint64_t)
 };
 
-static void *dt_compile(dtrace_hdl_t *, int, dtrace_probespec_t, void *,
+static void *dt_compile(dtrace_hdl_t *, int, int, dtrace_probespec_t, void *,
     uint_t, int, char *const[], FILE *, const char *);
 
 /*ARGSUSED*/
@@ -1841,6 +1844,10 @@ dt_reduce(dtrace_hdl_t *dtp, dt_version_t v)
 static FILE *
 dt_preproc(dtrace_hdl_t *dtp, FILE *ifp)
 {
+#ifdef _WIN32
+	/* This is to be implemented for Win32 targets */
+	return (NULL);
+#else
 	int argc = dtp->dt_cpp_argc;
 	char **argv = malloc(sizeof (char *) * (argc + 5));
 	FILE *ofp = tmpfile();
@@ -1983,6 +1990,7 @@ err:
 	free(argv);
 	(void) fclose(ofp);
 	return (NULL);
+#endif
 }
 
 static void
@@ -2256,7 +2264,7 @@ dt_load_libs_dir(dtrace_hdl_t *dtp, const char *path)
 			return (-1); /* preserve dt_errno */
 		}
 
-		rv = dt_compile(dtp, DT_CTX_DPROG,
+		rv = dt_compile(dtp, DT_CTX_DPROG, 1,
 		    DTRACE_PROBESPEC_NAME, NULL,
 		    DTRACE_C_EMPTY | DTRACE_C_CTL, 0, NULL, fp, NULL);
 
@@ -2386,7 +2394,7 @@ dt_load_libs(dtrace_hdl_t *dtp)
 }
 
 static void *
-dt_compile(dtrace_hdl_t *dtp, int context, dtrace_probespec_t pspec, void *arg,
+dt_compile(dtrace_hdl_t *dtp, int context, int acheck, dtrace_probespec_t pspec, void *arg,
     uint_t cflags, int argc, char *const argv[], FILE *fp, const char *s)
 {
 	dt_node_t *dnp;
@@ -2394,6 +2402,10 @@ dt_compile(dtrace_hdl_t *dtp, int context, dtrace_probespec_t pspec, void *arg,
 	dt_pcb_t pcb;
 	void *volatile rv;
 	int err;
+#ifdef _WIN32
+	char *slocal = NULL;
+	int noexec = 0;
+#endif
 
 	if ((fp == NULL && s == NULL) || (cflags & ~DTRACE_C_MASK) != 0) {
 		(void) dt_set_errno(dtp, EINVAL);
@@ -2411,6 +2423,18 @@ dt_compile(dtrace_hdl_t *dtp, int context, dtrace_probespec_t pspec, void *arg,
 
 	if (fp && (cflags & DTRACE_C_CPP) && (fp = dt_preproc(dtp, fp)) == NULL)
 		return (NULL); /* errno is set for us */
+
+#ifdef _WIN32
+	if (acheck) {
+		slocal = (char*)s;
+		noexec = dt_execution_policy(&fp, &slocal);
+		if (slocal == s) {
+			slocal = NULL;
+		} else {
+			s = slocal;
+		}
+	}
+#endif
 
 	dt_pcb_push(dtp, &pcb);
 
@@ -2534,6 +2558,9 @@ dt_compile(dtrace_hdl_t *dtp, int context, dtrace_probespec_t pspec, void *arg,
 		yypcb->pcb_prog->dp_xrefslen = yypcb->pcb_asxreflen;
 		yypcb->pcb_asxrefs = NULL;
 		yypcb->pcb_asxreflen = 0;
+#ifdef _WIN32
+		yypcb->pcb_prog->dp_noexec = noexec;
+#endif
 
 		rv = yypcb->pcb_prog;
 		break;
@@ -2575,15 +2602,30 @@ out:
 		(void) fclose(yypcb->pcb_fileptr); /* close dt_preproc() file */
 
 	dt_pcb_pop(dtp, err);
+
+#ifdef _WIN32
+	if (NULL != slocal) {
+		free(slocal);
+	}
+#endif
+
 	(void) dt_set_errno(dtp, err);
 	return (err ? NULL : rv);
+}
+
+dtrace_prog_t *
+dt_program_strcompile(dtrace_hdl_t *dtp, const char *s,
+    dtrace_probespec_t spec, uint_t cflags, int argc, char *const argv[])
+{
+	return (dt_compile(dtp, DT_CTX_DPROG, 0,
+	    spec, NULL, cflags, argc, argv, NULL, s));
 }
 
 dtrace_prog_t *
 dtrace_program_strcompile(dtrace_hdl_t *dtp, const char *s,
     dtrace_probespec_t spec, uint_t cflags, int argc, char *const argv[])
 {
-	return (dt_compile(dtp, DT_CTX_DPROG,
+	return (dt_compile(dtp, DT_CTX_DPROG, 1,
 	    spec, NULL, cflags, argc, argv, NULL, s));
 }
 
@@ -2591,14 +2633,14 @@ dtrace_prog_t *
 dtrace_program_fcompile(dtrace_hdl_t *dtp, FILE *fp,
     uint_t cflags, int argc, char *const argv[])
 {
-	return (dt_compile(dtp, DT_CTX_DPROG,
+	return (dt_compile(dtp, DT_CTX_DPROG, 1,
 	    DTRACE_PROBESPEC_NAME, NULL, cflags, argc, argv, fp, NULL));
 }
 
 int
 dtrace_type_strcompile(dtrace_hdl_t *dtp, const char *s, dtrace_typeinfo_t *dtt)
 {
-	(void) dt_compile(dtp, DT_CTX_DTYPE,
+	(void) dt_compile(dtp, DT_CTX_DTYPE, 0,
 	    DTRACE_PROBESPEC_NONE, dtt, 0, 0, NULL, NULL, s);
 	return (dtp->dt_errno ? -1 : 0);
 }
@@ -2606,7 +2648,7 @@ dtrace_type_strcompile(dtrace_hdl_t *dtp, const char *s, dtrace_typeinfo_t *dtt)
 int
 dtrace_type_fcompile(dtrace_hdl_t *dtp, FILE *fp, dtrace_typeinfo_t *dtt)
 {
-	(void) dt_compile(dtp, DT_CTX_DTYPE,
+	(void) dt_compile(dtp, DT_CTX_DTYPE, 0,
 	    DTRACE_PROBESPEC_NONE, dtt, 0, 0, NULL, fp, NULL);
 	return (dtp->dt_errno ? -1 : 0);
 }

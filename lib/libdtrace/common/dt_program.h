@@ -27,6 +27,7 @@
 #ifndef	_DT_PROGRAM_H
 #define	_DT_PROGRAM_H
 
+
 #pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #ifdef	__cplusplus
@@ -47,6 +48,9 @@ struct dtrace_prog {
 	ulong_t **dp_xrefs;	/* array of translator reference bitmaps */
 	uint_t dp_xrefslen;	/* length of dp_xrefs array */
 	uint8_t dp_dofversion;	/* DOF version this program requires */
+#ifdef _WIN32
+	int dp_noexec;		/* this program should not be executed */
+#endif
 };
 
 extern dtrace_prog_t *dt_program_create(dtrace_hdl_t *);

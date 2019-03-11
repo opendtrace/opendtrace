@@ -76,7 +76,7 @@ dt_regset_reset(dt_regset_t *drp)
 void
 dt_regset_assert_free(dt_regset_t *drp)
 {
-	int reg;
+	ulong_t reg;
 	boolean_t fail = B_FALSE;
 	for (reg = 0; reg < drp->dr_size; reg++) {
 		if (BT_TEST(drp->dr_bitmap, reg) != 0)  {

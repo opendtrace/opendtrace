@@ -28,6 +28,9 @@
  * Copyright (c) 2014, 2016 by Delphix. All rights reserved.
  * Copyright (c) 2013, Joyent, Inc. All rights reserved.
  */
+/*
+ * Portions Copyright Microsoft Corporation.
+ */
 
 #ifndef	_DTRACE_H
 #define	_DTRACE_H
@@ -37,7 +40,7 @@
 #include <stdio.h>
 #include <gelf.h>
 #include <libproc.h>
-#ifndef illumos
+#if !defined(illumos) && !defined(_WIN32)
 #include <rtld_db.h>
 #endif
 
@@ -463,6 +466,7 @@ extern void dtrace_proc_continue(dtrace_hdl_t *, struct ps_prochandle *);
  */
 
 #define	DTRACE_OBJ_EXEC	 ((const char *)0L)	/* primary executable file */
+
 #define	DTRACE_OBJ_RTLD	 ((const char *)1L)	/* run-time link-editor */
 #define	DTRACE_OBJ_CDEFS ((const char *)2L)	/* C include definitions */
 #define	DTRACE_OBJ_DDEFS ((const char *)3L)	/* D program definitions */
@@ -475,12 +479,17 @@ typedef struct dtrace_objinfo {
 	const char *dto_file;			/* object file path (if any) */
 	int dto_id;				/* object file id (if any) */
 	uint_t dto_flags;			/* object flags (see below) */
+#ifdef _WIN32
+	GElf_Addr dto_image_base;		/* address of the image */
+	GElf_Xword dto_image_size;		/* size of the image */
+#else
 	GElf_Addr dto_text_va;			/* address of text section */
 	GElf_Xword dto_text_size;		/* size of text section */
 	GElf_Addr dto_data_va;			/* address of data section */
 	GElf_Xword dto_data_size;		/* size of data section */
 	GElf_Addr dto_bss_va;			/* address of BSS */
 	GElf_Xword dto_bss_size;		/* size of BSS */
+#endif
 } dtrace_objinfo_t;
 
 #define	DTRACE_OBJ_F_KERNEL	0x1		/* object is a kernel module */
@@ -562,7 +571,7 @@ struct dtrace_vector {
 #ifdef illumos
 	int (*dtv_ioctl)(void *, int, void *);
 #else
-	int (*dtv_ioctl)(void *, u_long, void *);
+	int (*dtv_ioctl)(void *, ulong_t, void *);
 #endif
 	int (*dtv_lookup_by_addr)(void *, GElf_Addr, GElf_Sym *,
 	    dtrace_syminfo_t *);
@@ -603,6 +612,7 @@ extern const char *dtrace_class_name(dtrace_class_t);
 
 extern int dtrace_provider_modules(dtrace_hdl_t *, const char **, int);
 
+extern const char *dtrace_version(void);
 extern const char *const _dtrace_version;
 extern int _dtrace_debug;
 
@@ -610,7 +620,7 @@ extern int _dtrace_debug;
 }
 #endif
 
-#ifndef illumos
+#if !defined(illumos) && !defined(_WIN32)
 #define _SC_CPUID_MAX		_SC_NPROCESSORS_CONF
 #define _SC_NPROCESSORS_MAX	_SC_NPROCESSORS_CONF
 #endif

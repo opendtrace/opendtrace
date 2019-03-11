@@ -876,6 +876,8 @@ dtrace_probe_iter(dtrace_hdl_t *dtp,
 	for (;;) {
 		if (pdp != NULL)
 			bcopy(pdp, &pd, sizeof (pd));
+		else
+			bzero(&pd, sizeof (pd));
 
 		pd.dtpd_id = id;
 

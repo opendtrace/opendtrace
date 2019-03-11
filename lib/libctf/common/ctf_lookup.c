@@ -24,6 +24,9 @@
  * Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
+/*
+ * Portions Copyright Microsoft Corporation.
+ */
 
 #pragma ident	"%Z%%M%	%I%	%E% SMI"
 
@@ -171,6 +174,8 @@ err:
 	return (CTF_ERR);
 }
 
+
+#ifndef _WIN32
 /*
  * Given a symbol table index, return the type of the data object described
  * by the corresponding entry in the symbol table.
@@ -201,11 +206,14 @@ ctf_lookup_by_symbol(ctf_file_t *fp, ulong_t symidx)
 		return (ctf_set_errno(fp, ECTF_NOTYPEDAT));
 
 	type = *(ushort_t *)((uintptr_t)fp->ctf_buf + fp->ctf_sxlate[symidx]);
+
 	if (type == 0)
 		return (ctf_set_errno(fp, ECTF_NOTYPEDAT));
 
 	return (type);
 }
+
+#endif
 
 /*
  * Return the pointer to the internal CTF type data corresponding to the
@@ -224,6 +232,7 @@ ctf_lookup_by_id(ctf_file_t **fpp, ctf_id_t type)
 	}
 
 	type = CTF_TYPE_TO_INDEX(type);
+
 	if (type > 0 && type <= fp->ctf_typemax) {
 		*fpp = fp; /* function returns ending CTF container */
 		return (LCTF_INDEX_TO_TYPEPTR(fp, type));
@@ -240,6 +249,37 @@ ctf_lookup_by_id(ctf_file_t **fpp, ctf_id_t type)
 int
 ctf_func_info(ctf_file_t *fp, ulong_t symidx, ctf_funcinfo_t *fip)
 {
+#ifdef _WIN32
+	/* Win32 symix is actually a type index. */
+	ctf_dtdef_t *dtd = ctf_dtd_lookup(fp, symidx);
+	if (NULL == dtd)
+		return (ctf_set_errno(fp, EINVAL));
+
+	const ctf_id_t *dp;
+	ushort_t info, kind, n;
+
+	kind = LCTF_INFO_KIND(fp, dtd->dtd_data.ctt_info);
+	n = LCTF_INFO_VLEN(fp, dtd->dtd_data.ctt_info);
+
+	if (kind == CTF_K_UNKNOWN && n == 0)
+		return (ctf_set_errno(fp, ECTF_NOFUNCDAT));
+
+	if (kind != CTF_K_FUNCTION)
+		return (ctf_set_errno(fp, ECTF_CORRUPT));
+
+	dp = dtd->dtd_u.dtu_argv;
+	fip->ctc_return = dtd->dtd_data.ctt_type;
+	fip->ctc_argc = n;
+	fip->ctc_flags = 0;
+
+	if (n != 0 && dp[n - 1] == 0) {
+		fip->ctc_flags |= CTF_FUNC_VARARG;
+		fip->ctc_argc--;
+	}
+
+	return (0);
+#else
+
 	const ctf_sect_t *sp = &fp->ctf_symtab;
 	const ushort_t *dp;
 	ushort_t info, kind, n;
@@ -285,6 +325,7 @@ ctf_func_info(ctf_file_t *fp, ulong_t symidx, ctf_funcinfo_t *fip)
 	}
 
 	return (0);
+#endif
 }
 
 /*
@@ -294,6 +335,34 @@ ctf_func_info(ctf_file_t *fp, ulong_t symidx, ctf_funcinfo_t *fip)
 int
 ctf_func_args(ctf_file_t *fp, ulong_t symidx, uint_t argc, ctf_id_t *argv)
 {
+#ifdef _WIN32
+	/* Win32 symix is actually a type index. */
+	ctf_dtdef_t *dtd = ctf_dtd_lookup(fp, symidx);
+	if (NULL == dtd)
+		return (ctf_set_errno(fp, EINVAL));
+
+	const ctf_id_t *dp;
+	ushort_t info, kind, n;
+
+	kind = LCTF_INFO_KIND(fp, dtd->dtd_data.ctt_info);
+	n = LCTF_INFO_VLEN(fp, dtd->dtd_data.ctt_info);
+
+	if (kind == CTF_K_UNKNOWN && n == 0)
+		return (ctf_set_errno(fp, ECTF_NOFUNCDAT));
+
+	if (kind != CTF_K_FUNCTION)
+		return (ctf_set_errno(fp, ECTF_CORRUPT));
+
+	dp = dtd->dtd_u.dtu_argv;
+	if (n != 0 && dp[n - 1] == 0) {
+		n--;
+	}
+
+	for (argc = MIN(argc, n); argc != 0; argc--)
+		*argv++ = *dp++;
+
+	return (0);
+#else
 	const ushort_t *dp;
 	ctf_funcinfo_t f;
 
@@ -310,4 +379,5 @@ ctf_func_args(ctf_file_t *fp, ulong_t symidx, uint_t argc, ctf_id_t *argv)
 		*argv++ = *dp++;
 
 	return (0);
+#endif
 }
